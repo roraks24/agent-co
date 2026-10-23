@@ -43,6 +43,48 @@ class SelectionEngine:
         models = self.registry.list_all(enabled_only=True)
         tier = classification.task_tier
 
+        # Check for explicit manual selection
+        user_key = (request.api_key or "").strip() or None
+        if request.selected_api_id and request.selected_api_id.strip() and request.selected_api_id.strip().lower() != "auto":
+            target_id = request.selected_api_id.strip()
+            chosen_entry = self.registry.get(target_id)
+            if not chosen_entry:
+                for m in models:
+                    if m.model_name.lower() == target_id.lower() or m.id.lower() == target_id.lower():
+                        chosen_entry = m
+                        break
+
+            if chosen_entry:
+                cred_source = self.registry.resolve_credential_source(chosen_entry, user_key)
+                fallback_chain = [
+                    m.id for m in models if m.id != chosen_entry.id
+                ][: self.settings.fallback_max_retries]
+                return SelectionDecision(
+                    selected_api=chosen_entry.id,
+                    provider=chosen_entry.provider,
+                    model=chosen_entry.model_name,
+                    task_tier=tier,
+                    reason=f"Manual selection: User explicitly selected {chosen_entry.description or chosen_entry.model_name} ({chosen_entry.provider}).",
+                    confidence=1.0,
+                    candidate_rankings=[],
+                    fallback_chain=fallback_chain,
+                    fallback_used=False,
+                    latency_tier=chosen_entry.latency_tier,
+                    estimated_cost_tier=chosen_entry.cost_tier,
+                    resolved_api_key_source=cred_source,
+                    tradeoff_notes=None,
+                    selection_mode="manual",
+                    selected_api_details={
+                        "id": chosen_entry.id,
+                        "display_name": chosen_entry.description or chosen_entry.model_name,
+                        "provider": chosen_entry.provider,
+                        "model": chosen_entry.model_name,
+                        "capability_tier": chosen_entry.capability_tier.value,
+                        "latency_tier": chosen_entry.latency_tier.value,
+                        "cost_tier": chosen_entry.cost_tier.value,
+                    },
+                )
+
         candidate_scores: list[CandidateScore] = []
         user_key = (request.api_key or "").strip() or None
 
@@ -112,6 +154,16 @@ class SelectionEngine:
             estimated_cost_tier=selected_entry.cost_tier,
             resolved_api_key_source=cred_source,
             tradeoff_notes=tradeoff_notes,
+            selection_mode="automatic",
+            selected_api_details={
+                "id": selected_entry.id,
+                "display_name": selected_entry.description or selected_entry.model_name,
+                "provider": selected_entry.provider,
+                "model": selected_entry.model_name,
+                "capability_tier": selected_entry.capability_tier.value,
+                "latency_tier": selected_entry.latency_tier.value,
+                "cost_tier": selected_entry.cost_tier.value,
+            },
         )
 
     def _evaluate_model(

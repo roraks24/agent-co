@@ -190,3 +190,9 @@ frontend/.npm-cache/
 frontend/.npm-cache2/
 tests/.tmp/
 tmp*/
+
+
+# SQLite database files and persistent data
+*.db
+*.sqlite3
+data/

@@ -23,7 +23,9 @@ import {
   setWorkspaceId,
   touchWorkspaceSession,
   type WorkspaceTreeNode,
-  writeWorkspaceFile
+  writeWorkspaceFile,
+  type ApiProvider,
+  fetchProviders
 } from "@/app/lib/api-client";
 import { getStoredApiKey } from "@/app/lib/api-key-storage";
 import { consumeSseStream } from "@/app/lib/sse";
@@ -92,6 +94,7 @@ export interface StartAgentRunInput {
   userPrompt: string;
   workspaceMode: "fresh" | "continue";
   model?: string;
+  selectedApiId?: string | null;
   recursionLimit?: number;
   mutablePrompt?: string | null;
 }
@@ -137,6 +140,11 @@ interface AgentStoreState {
   downloadWorkspaceZip: () => Promise<void>;
   setActiveFilePath: (path: string | null) => void;
   setPromptOverride: (nodeId: NodeId, value: string) => void;
+  availableProviders: ApiProvider[];
+  selectedApiId: string | null;
+  lastUsedApiDetails: Record<string, unknown> | null;
+  setSelectedApiId: (id: string | null) => void;
+  fetchAvailableProviders: () => Promise<void>;
 }
 
 const NODE_IDS: NodeId[] = ["planner", "architect", "coder"];
@@ -432,6 +440,11 @@ function buildDisplayLogMessage(
   const nodeLabel = node ? `${node[0]?.toUpperCase() ?? ""}${node.slice(1)}` : "Workflow";
   const rawMessage = typeof data.message === "string" ? data.message.trim() : "";
 
+  if (eventName === "adaptive_selection") {
+    const meta = (data.metadata || data) as Record<string, unknown>;
+    const details = (meta.selected_api_details || meta) as Record<string, unknown>;
+    set({ lastUsedApiDetails: details });
+  }
   if (eventName === "on_action_plan") {
     const stepCount = data.plan && typeof data.plan === 'object' && Array.isArray((data.plan as any).steps) ? (data.plan as any).steps.length : 'Multiple';
     return `Plan created: ${stepCount} action steps planned.`;
@@ -528,6 +541,20 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   objectiveStatus: null,
   finalSummary: null,
   verification: null,
+  availableProviders: [],
+  selectedApiId: null,
+  lastUsedApiDetails: null,
+  setSelectedApiId: (id: string | null) => {
+    set({ selectedApiId: id });
+  },
+  fetchAvailableProviders: async () => {
+    try {
+      const providers = await fetchProviders(true);
+      set({ availableProviders: providers });
+    } catch (error) {
+      console.warn('Failed to load API providers:', error);
+    }
+  },
   initWorkspaceSession: async () => {
     try {
       const existingWorkspaceId = get().workspaceId ?? getWorkspaceId();
@@ -889,7 +916,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         mutable_prompt: input.mutablePrompt ?? null,
         prompt_overrides: buildPromptOverrides(get().promptOverrides),
         workspace_id: workspaceId,
-        api_key: localApiKey
+        api_key: localApiKey,
+        selected_api_id: input.selectedApiId ?? get().selectedApiId ?? null
       };
 
       ensureApiBaseUrlConfigured();

@@ -275,3 +275,108 @@ export async function deleteWorkspaceSession(workspaceId: string): Promise<{ wor
 export function workspaceDownloadUrl(): string {
   return `${API_BASE_URL}/workspace/download`;
 }
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Provider/Model Selection API
+// ──────────────────────────────────────────────────────────────────────────────
+
+export interface ApiProvider {
+  id: string;
+  provider_name: string;
+  display_name: string;
+  base_url: string | null;
+  model_name: string;
+  capability_tier: "LOW" | "MEDIUM" | "HIGH";
+  supported_tasks: string[];
+  context_window: number;
+  max_output_tokens: number;
+  latency_tier: string;
+  cost_tier: string;
+  is_active: boolean;
+  is_default: boolean;
+  priority: number;
+  health_status: string;
+  has_api_key: boolean;
+  api_key_masked: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateProviderRequest {
+  id?: string;
+  provider_name: string;
+  display_name: string;
+  api_key?: string;
+  base_url?: string | null;
+  model_name: string;
+  capability_tier?: "LOW" | "MEDIUM" | "HIGH";
+  supported_tasks?: string[];
+  context_window?: number;
+  max_output_tokens?: number;
+  latency_tier?: string;
+  cost_tier?: string;
+  is_active?: boolean;
+  is_default?: boolean;
+  priority?: number;
+}
+
+export interface UpdateProviderRequest {
+  provider_name?: string;
+  display_name?: string;
+  api_key?: string;
+  base_url?: string | null;
+  model_name?: string;
+  capability_tier?: "LOW" | "MEDIUM" | "HIGH";
+  supported_tasks?: string[];
+  context_window?: number;
+  max_output_tokens?: number;
+  latency_tier?: string;
+  cost_tier?: string;
+  is_active?: boolean;
+  is_default?: boolean;
+  priority?: number;
+  health_status?: string;
+}
+
+export async function fetchProviders(activeOnly = false): Promise<ApiProvider[]> {
+  const response = await apiClient.get<ApiProvider[]>("/api/providers", {
+    params: { active_only: activeOnly },
+  });
+  return response.data;
+}
+
+export async function createProvider(data: CreateProviderRequest): Promise<ApiProvider> {
+  const response = await apiClient.post<ApiProvider>("/api/providers", data);
+  return response.data;
+}
+
+export async function updateProvider(
+  providerId: string,
+  data: UpdateProviderRequest
+): Promise<ApiProvider> {
+  const response = await apiClient.patch<ApiProvider>(
+    `/api/providers/${encodeURIComponent(providerId)}`,
+    data
+  );
+  return response.data;
+}
+
+export async function deleteProvider(providerId: string): Promise<{ deleted: boolean }> {
+  const response = await apiClient.delete<{ deleted: boolean }>(
+    `/api/providers/${encodeURIComponent(providerId)}`
+  );
+  return response.data;
+}
+
+export async function testProvider(
+  providerId: string
+): Promise<{ provider_id: string; status: string; message: string; has_key: boolean }> {
+  const response = await apiClient.post<{
+    provider_id: string;
+    status: string;
+    message: string;
+    has_key: boolean;
+  }>(`/api/providers/${encodeURIComponent(providerId)}/test`);
+  return response.data;
+}

@@ -86,6 +86,8 @@ def build_response_selection_metadata(
         "task_tier": decision.task_tier.value,
         "confidence": decision.confidence,
         "reason": sanitize_secrets(decision.reason),
+        "selection_mode": getattr(decision, "selection_mode", "automatic"),
+        "selected_api_details": getattr(decision, "selected_api_details", None),
         "fallback_used": decision.fallback_used,
         "fallback_chain": decision.fallback_chain,
         "fallback_events": [evt.model_dump() for evt in decision.fallback_events],

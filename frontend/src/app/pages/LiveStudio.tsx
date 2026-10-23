@@ -28,6 +28,7 @@ import {
   saveApiKey,
 } from "@/app/lib/api-key-storage";
 import { useAgentStore } from "@/app/store/useAgentStore";
+import { ApiModelSelector } from "@/app/components/ApiModelSelector";
 
 /* ─────────────────────────────────────────────────────────────────────────────
    The studio runs on the dark surface — same two materials as the rest of the
@@ -1152,6 +1153,7 @@ export function LiveStudio() {
           flexShrink: 0,
         }}
       >
+        <ApiModelSelector />
         <textarea
           id="agent-user-prompt"
           className="field"

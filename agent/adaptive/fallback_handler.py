@@ -64,14 +64,14 @@ class ExecutionAndFallbackHandler:
 
                 if attempt_idx > 0:
                     decision.fallback_used = True
-                    decision.selected_api = entry.id
+                    decision.selected_api = candidate_id
                     decision.provider = entry.provider
                     decision.model = entry.model_name
                     decision.latency_tier = entry.latency_tier
                     decision.estimated_cost_tier = entry.cost_tier
                     logger.info(
                         "Fallback succeeded with %s on attempt %d",
-                        entry.id,
+                        candidate_id,
                         attempt_idx + 1,
                     )
 

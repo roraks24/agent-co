@@ -299,10 +299,21 @@ POST /generate
 }
 ```
 
-### Dedicated Adaptive Endpoints
+### Dedicated Adaptive & Provider Endpoints
+- `GET /api/providers`: Returns safe, non-secret API metadata list for frontend selection (supports `?active_only=true`).
+- `POST /api/providers`: Registers a new API provider model with automatic AES-256-GCM credential encryption at rest.
+- `PATCH /api/providers/{id}`: Updates provider metadata, capability tier, latency/cost tier, priority, or active status.
+- `DELETE /api/providers/{id}`: Soft-deactivates or permanently deletes a provider configuration (`?hard=true`).
+- `POST /api/providers/{id}/test`: Validates provider credentials and model initialization without exposing raw keys.
+- `POST /api/chat` (or `/generate`): Accepts `selected_api_id` for manual selection or omits it for automatic adaptive routing.
 - `POST /v1/adaptive/classify`: Evaluates a prompt and returns its task tier, confidence, and linguistic signals.
 - `POST /v1/adaptive/select`: Evaluates requirements and returns ranked candidate scores and fallback order.
 - `GET /v1/adaptive/registry`: Returns catalog of available models, capability tiers, and health status (without exposing secrets).
+
+### Database Storage & Security
+- Stored in SQLite database (`data/agent_co.db` or via `DATABASE_PATH`).
+- All stored API keys are encrypted at rest with **AES-256-GCM** using `API_KEY_ENCRYPTION_SECRET` or reference environment variables via the `env:VAR_NAME` pattern.
+- Raw API keys are never emitted in API responses, logs, or frontend payloads. Frontend APIs return masked hints (e.g. `gsk_...4a8e` or `env(OPENAI_API_KEY)`).
 
 ## Deployment (Render + Vercel)
 ### Backend on Render

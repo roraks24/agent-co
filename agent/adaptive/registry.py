@@ -228,10 +228,36 @@ def _get_default_registry_entries() -> list[ApiRegistryEntry]:
 class ApiRegistry:
     """Thread-safe registry for model discovery, capabilities, and credential resolution."""
 
-    def __init__(self, entries: Optional[list[ApiRegistryEntry]] = None):
+    def __init__(
+        self,
+        entries: Optional[list[ApiRegistryEntry]] = None,
+        db_path: Optional[str] = None,
+    ):
         self._entries: dict[str, ApiRegistryEntry] = {}
-        initial = entries if entries is not None else _get_default_registry_entries()
-        for entry in initial:
+        self.db_path = db_path
+        if entries is not None:
+            for entry in entries:
+                self._entries[entry.id] = entry
+        else:
+            self.reload_from_db_or_defaults()
+
+    def reload_from_db_or_defaults(self) -> None:
+        """Load provider models from database repository; fallback to static presets if DB empty."""
+        try:
+            from agent.db.database import ProviderRepository, provider_to_registry_entry
+            repo = ProviderRepository(self.db_path)
+            db_records = repo.list_providers(active_only=False)
+            if db_records:
+                self._entries.clear()
+                for rec in db_records:
+                    entry = provider_to_registry_entry(rec)
+                    self._entries[entry.id] = entry
+                return
+        except Exception:
+            pass
+
+        self._entries.clear()
+        for entry in _get_default_registry_entries():
             self._entries[entry.id] = entry
 
     def register(self, entry: ApiRegistryEntry) -> None:
@@ -243,8 +269,19 @@ class ApiRegistry:
         return self._entries.pop(model_id, None) is not None
 
     def get(self, model_id: str) -> Optional[ApiRegistryEntry]:
-        """Fetch model by ID."""
-        return self._entries.get(model_id)
+        """Fetch model by ID, with fallback alias matching."""
+        if not model_id:
+            return None
+        if model_id in self._entries:
+            return self._entries[model_id]
+        # Match slash vs dash normalization (e.g. 'openai/gpt-4o' <-> 'openai-gpt-4o')
+        normalized = model_id.replace("/", "-")
+        if normalized in self._entries:
+            return self._entries[normalized]
+        for entry in self._entries.values():
+            if entry.id.replace("/", "-") == normalized or entry.model_name == model_id:
+                return entry
+        return None
 
     def list_all(self, enabled_only: bool = True) -> list[ApiRegistryEntry]:
         """List registered models."""
@@ -265,10 +302,12 @@ class ApiRegistry:
 
     def has_credentials(
         self,
-        entry: ApiRegistryEntry,
+        entry: Optional[ApiRegistryEntry],
         provided_api_key: Optional[str] = None,
     ) -> bool:
         """Check whether valid credentials exist for this model without exposing secrets."""
+        if not entry:
+            return False
         # Local models require no external key
         if entry.provider == "local" or not entry.required_env_vars:
             return True
@@ -289,6 +328,19 @@ class ApiRegistry:
             if val:
                 return True
 
+        # Database stored encrypted key or env reference (if not pointing to missing env var)
+        try:
+            from agent.db.database import ProviderRepository
+            repo = ProviderRepository(self.db_path)
+            rec = repo.get_provider(entry.id)
+            if rec and rec.api_key_encrypted and rec.api_key_encrypted.strip():
+                if rec.api_key_encrypted.startswith("env:"):
+                    env_var = rec.api_key_encrypted[4:].strip()
+                    return bool(os.getenv(env_var, "").strip())
+                return True
+        except Exception:
+            pass
+
         return False
 
     def resolve_credential_source(
@@ -304,4 +356,19 @@ class ApiRegistry:
         for env_var in entry.required_env_vars:
             if os.getenv(env_var, "").strip():
                 return f"environment variable ({env_var})"
+
+        try:
+            from agent.db.database import ProviderRepository
+            repo = ProviderRepository(self.db_path)
+            rec = repo.get_provider(entry.id)
+            if rec and rec.api_key_encrypted and rec.api_key_encrypted.strip():
+                if rec.api_key_encrypted.startswith("env:"):
+                    env_var = rec.api_key_encrypted[4:].strip()
+                    if os.getenv(env_var, "").strip():
+                        return f"database: env reference ({env_var})"
+                    return "missing"
+                return "database: AES-256 encrypted credential"
+        except Exception:
+            pass
+
         return "missing"

@@ -61,6 +61,7 @@ class TaskIntakeRequest(BaseModel):
     modalities: Optional[list[str]] = Field(default=None, description="Requested modalities: text, vision, etc.")
     preferred_provider: Optional[str] = Field(default=None, description="User preferred provider: groq, openai, etc.")
     preferred_model: Optional[str] = Field(default=None, description="Explicit user model choice.")
+    selected_api_id: Optional[str] = Field(default=None, description="Explicit database API provider ID for manual selection.")
     api_key: Optional[str] = Field(default=None, description="Optional caller-provided API key.")
 
     model_config = ConfigDict(extra="allow")
@@ -160,5 +161,7 @@ class SelectionDecision(BaseModel):
     estimated_cost_tier: CostTier = Field(default=CostTier.LOW)
     resolved_api_key_source: str = Field(default="env")
     tradeoff_notes: Optional[str] = Field(default=None)
+    selection_mode: str = Field(default="automatic", description="'manual' or 'automatic'")
+    selected_api_details: Optional[dict[str, Any]] = Field(default=None, description="Safe details of chosen provider.")
 
     model_config = ConfigDict(extra="allow")

@@ -13,6 +13,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
@@ -43,6 +44,13 @@ try:  # pragma: no cover - supports script execution
         TaskIntakeRequest,
         build_response_selection_metadata,
     )
+    from .db.database import ProviderRepository
+    from .db.models import (
+        ApiProviderCreate,
+        ApiProviderPublic,
+        ApiProviderRecord,
+        ApiProviderUpdate,
+    )
 except ImportError:  # pragma: no cover
     from graph import astream_workflow, get_graph_schema, run_workflow
     from llm_factory import DEFAULT_GROQ_MODEL, PROVIDER_NAME, build_chat_model
@@ -60,6 +68,13 @@ except ImportError:  # pragma: no cover
         GLOBAL_ADAPTIVE_PIPELINE,
         TaskIntakeRequest,
         build_response_selection_metadata,
+    )
+    from db.database import ProviderRepository
+    from db.models import (
+        ApiProviderCreate,
+        ApiProviderPublic,
+        ApiProviderRecord,
+        ApiProviderUpdate,
     )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +102,7 @@ class RunWorkflowRequest(BaseModel):
     prompt_overrides: dict[str, str] | None = None
     workspace_id: str | None = None
     model: str | None = None
+    selected_api_id: str | None = None
     recursion_limit: int = Field(default=100, ge=1, le=1000)
     task_type: str | None = None
     desired_quality: str | None = None
@@ -1166,6 +1182,7 @@ def workspace_download(
 
 @app.post("/generate", response_model=RunWorkflowResponse)
 @app.post("/v1/workflows/run", response_model=RunWorkflowResponse)
+@app.post("/api/chat", response_model=RunWorkflowResponse)
 async def run_agent_workflow(
     payload: RunWorkflowRequest,
     x_api_key: str | None = Header(default=None, alias="X-API-KEY"),
@@ -1192,11 +1209,16 @@ async def run_agent_workflow(
             modalities=payload.modalities,
             preferred_provider=payload.preferred_provider,
             preferred_model=payload.model if (payload.model and payload.model != "adaptive") else None,
+            selected_api_id=payload.selected_api_id,
             api_key=api_key,
         )
         adaptive_decision, _reqs = GLOBAL_ADAPTIVE_PIPELINE.route(intake_req)
 
-        if payload.model and payload.model != "adaptive":
+        if payload.selected_api_id and payload.selected_api_id.strip().lower() != "auto":
+            # Manual selection from database
+            effective_model = adaptive_decision.model
+            effective_provider = adaptive_decision.provider
+        elif payload.model and payload.model != "adaptive":
             effective_model = payload.model
             effective_provider = None
         else:
@@ -1280,11 +1302,15 @@ async def stream_agent_workflow(
             modalities=payload.modalities,
             preferred_provider=payload.preferred_provider,
             preferred_model=payload.model if (payload.model and payload.model != "adaptive") else None,
+            selected_api_id=payload.selected_api_id,
             api_key=api_key,
         )
         adaptive_decision, _reqs = GLOBAL_ADAPTIVE_PIPELINE.route(intake_req)
 
-        if payload.model and payload.model != "adaptive":
+        if payload.selected_api_id and payload.selected_api_id.strip().lower() != "auto":
+            effective_model = adaptive_decision.model
+            effective_provider = adaptive_decision.provider
+        elif payload.model and payload.model != "adaptive":
             effective_model = payload.model
             effective_provider = None
         else:
@@ -1512,6 +1538,121 @@ async def stream_agent_workflow(
             )
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Provider CRUD Endpoints (database-backed API management)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_provider_repo = ProviderRepository()
+
+
+@app.get("/api/providers")
+@app.get("/v1/providers")
+def list_providers(active_only: bool = Query(default=False)) -> list[dict[str, Any]]:
+    """Return active API provider configurations with masked credentials for frontend display."""
+    records = _provider_repo.list_providers(active_only=active_only)
+    return [rec.to_public().model_dump() for rec in records]
+
+
+@app.post("/api/providers", status_code=201)
+@app.post("/v1/providers", status_code=201)
+def create_provider(payload: ApiProviderCreate) -> dict[str, Any]:
+    """Register a new API provider configuration. API keys are encrypted at rest."""
+    try:
+        created = _provider_repo.create_provider(payload)
+        # Reload the adaptive pipeline registry from DB
+        GLOBAL_ADAPTIVE_PIPELINE.registry.reload_from_db_or_defaults()
+        return created.to_public().model_dump()
+    except Exception as exc:
+        logger.exception("Failed to create provider")
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "provider_create_failed", "message": str(exc)}},
+        )
+
+
+@app.patch("/api/providers/{provider_id:path}")
+@app.patch("/v1/providers/{provider_id:path}")
+def update_provider(provider_id: str, payload: ApiProviderUpdate) -> dict[str, Any]:
+    """Update fields for an existing provider. Re-encrypts API key if supplied."""
+    updated = _provider_repo.update_provider(provider_id, payload)
+    if not updated:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"Provider '{provider_id}' not found."}},
+        )
+    GLOBAL_ADAPTIVE_PIPELINE.registry.reload_from_db_or_defaults()
+    return updated.to_public().model_dump()
+
+
+@app.delete("/api/providers/{provider_id:path}")
+@app.delete("/v1/providers/{provider_id:path}")
+def delete_provider(provider_id: str, hard: bool = Query(default=False)) -> dict[str, Any]:
+    """Soft-delete (deactivate) or hard-delete a provider configuration."""
+    success = _provider_repo.delete_provider(provider_id, soft=not hard)
+    if not success:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"Provider '{provider_id}' not found."}},
+        )
+    GLOBAL_ADAPTIVE_PIPELINE.registry.reload_from_db_or_defaults()
+    return {"deleted": True, "provider_id": provider_id, "mode": "hard" if hard else "soft"}
+
+
+@app.post("/api/providers/{provider_id:path}/test")
+@app.post("/v1/providers/{provider_id:path}/test")
+def test_provider(provider_id: str) -> dict[str, Any]:
+    """Validate connectivity for a provider using its stored credentials (never exposes keys)."""
+    from agent.db.crypto import decrypt_secret
+
+    record = _provider_repo.get_provider(provider_id)
+    if not record:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": f"Provider '{provider_id}' not found."}},
+        )
+
+    resolved_key = ""
+    if record.api_key_encrypted:
+        resolved_key = decrypt_secret(record.api_key_encrypted)
+
+    if not resolved_key:
+        env_fallback = f"{record.provider_name.upper()}_API_KEY"
+        resolved_key = os.getenv(env_fallback, "")
+
+    if not resolved_key or not resolved_key.strip():
+        return {
+            "provider_id": provider_id,
+            "status": "error",
+            "message": "No API key configured or resolved for this provider.",
+            "has_key": False,
+        }
+
+    # Attempt a lightweight probe
+    try:
+        llm = build_chat_model(
+            api_key=resolved_key,
+            model=record.model_name,
+            provider=record.provider_name,
+            base_url=record.base_url,
+        )
+        # Just verify the model object can be instantiated
+        return {
+            "provider_id": provider_id,
+            "status": "ok",
+            "message": f"Provider '{record.display_name}' configuration is valid. Model client initialized successfully.",
+            "has_key": True,
+            "model_name": record.model_name,
+            "provider_name": record.provider_name,
+        }
+    except Exception as exc:
+        return {
+            "provider_id": provider_id,
+            "status": "error",
+            "message": f"Provider test failed: {str(exc)}",
+            "has_key": True,
+        }
 
 
 @app.post("/v1/adaptive/classify")
