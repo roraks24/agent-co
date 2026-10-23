@@ -25,6 +25,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from sqlalchemy.orm import Session
+
 try:  # pragma: no cover - supports script execution
     from .graph import astream_workflow, get_graph_schema, run_workflow
     from .llm_factory import DEFAULT_GROQ_MODEL, PROVIDER_NAME, build_chat_model
@@ -38,6 +40,10 @@ try:  # pragma: no cover - supports script execution
     from .tools_registry import GLOBAL_TOOL_REGISTRY
     from .security_config import SecurityConfig, load_security_config
     from . import workspace as workspace_service
+    from .database import get_db, get_db_context, init_db
+    from .models import ExecutionRecord as DbExecutionRecord
+    from .models import SavedPlan as DbSavedPlan
+    from .models import WorkflowRun as DbWorkflowRun
 except ImportError:  # pragma: no cover
     from graph import astream_workflow, get_graph_schema, run_workflow
     from llm_factory import DEFAULT_GROQ_MODEL, PROVIDER_NAME, build_chat_model
@@ -51,6 +57,10 @@ except ImportError:  # pragma: no cover
     from tools_registry import GLOBAL_TOOL_REGISTRY
     from security_config import SecurityConfig, load_security_config
     import workspace as workspace_service
+    from database import get_db, get_db_context, init_db
+    from models import ExecutionRecord as DbExecutionRecord
+    from models import SavedPlan as DbSavedPlan
+    from models import WorkflowRun as DbWorkflowRun
 
 logger = logging.getLogger(__name__)
 SECURITY_CONFIG: SecurityConfig = load_security_config()
@@ -848,6 +858,15 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def on_startup() -> None:
+    try:
+        init_db()
+        logger.info("Database schema initialized successfully.")
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Database schema init_db skipped/failed: %s", exc)
+
+
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(_, exc: RequestValidationError):  # pragma: no cover
     return _error_response(
@@ -1148,6 +1167,7 @@ async def run_agent_workflow(
 ):
     run_id = str(uuid4())
     workspace_session = None
+    start_time = perf_counter()
 
     try:
         _validate_prompt_payload(payload)
@@ -1157,6 +1177,22 @@ async def run_agent_workflow(
             request_workspace_id=payload.workspace_id,
         )
         llm = build_chat_model(api_key=api_key, model=payload.model)
+
+        # Persist initial run state
+        try:
+            with get_db_context() as db:
+                db.add(
+                    DbWorkflowRun(
+                        id=run_id,
+                        user_prompt=payload.user_prompt,
+                        status="RUNNING",
+                        provider=PROVIDER_NAME,
+                        model_name=payload.model or DEFAULT_GROQ_MODEL,
+                    )
+                )
+        except Exception as db_err:  # pragma: no cover
+            logger.warning("DB workflow_run start logging failed: %s", db_err)
+
         with workspace_service.workspace_context(workspace_session.workspace_id):
             result = await run_in_threadpool(
                 run_workflow,
@@ -1172,6 +1208,20 @@ async def run_agent_workflow(
     except Exception as exc:  # pragma: no cover
         logger.exception("Workflow failed run_id=%s", run_id)
         classification = _classify_exception(exc)
+        duration_ms = int((perf_counter() - start_time) * 1000)
+
+        # Update run failure in DB
+        try:
+            with get_db_context() as db:
+                db_run = db.get(DbWorkflowRun, run_id)
+                if db_run:
+                    db_run.status = "FAILED"
+                    db_run.error_message = str(exc)
+                    db_run.duration_ms = duration_ms
+                    db_run.completed_at = datetime.now(timezone.utc)
+        except Exception as db_err:
+            logger.warning("DB workflow_run error update failed: %s", db_err)
+
         message = (
             str(exc)
             if SECURITY_CONFIG.expose_verbose_errors
@@ -1185,6 +1235,52 @@ async def run_agent_workflow(
         if SECURITY_CONFIG.expose_verbose_errors:
             details["exception_chain"] = _exception_chain(exc)
         return _error_response(500, "workflow_error", message, details)
+
+    # Persist completed run, plan, and execution records
+    duration_ms = int((perf_counter() - start_time) * 1000)
+    try:
+        with get_db_context() as db:
+            db_run = db.get(DbWorkflowRun, run_id)
+            if db_run:
+                db_run.status = result.get("status", "DONE")
+                db_run.duration_ms = duration_ms
+                db_run.completed_at = datetime.now(timezone.utc)
+
+                plan_obj = result.get("plan")
+                task_plan_obj = result.get("detailed_ins")
+                if plan_obj or task_plan_obj:
+                    features_val = getattr(plan_obj, "features", None) if plan_obj else None
+                    task_steps = [
+                        s.model_dump() if hasattr(s, "model_dump") else dict(s)
+                        for s in getattr(task_plan_obj, "implementation_steps", [])
+                    ] if task_plan_obj else None
+                    db.add(
+                        DbSavedPlan(
+                            run_id=run_id,
+                            app_name=getattr(plan_obj, "name", None) if plan_obj else None,
+                            description=getattr(plan_obj, "description", None) if plan_obj else None,
+                            techstack=getattr(plan_obj, "techstack", None) if plan_obj else None,
+                            features=features_val,
+                            task_steps=task_steps,
+                        )
+                    )
+
+                for rec in result.get("execution_records") or []:
+                    rec_dict = rec.model_dump() if hasattr(rec, "model_dump") else (dict(rec) if isinstance(rec, dict) else {})
+                    db.add(
+                        DbExecutionRecord(
+                            run_id=run_id,
+                            step_id=rec_dict.get("step_id"),
+                            tool_name=rec_dict.get("tool_name", "unknown"),
+                            tool_args=rec_dict.get("tool_args"),
+                            tool_result=str(rec_dict.get("tool_result")) if rec_dict.get("tool_result") is not None else None,
+                            duration_ms=rec_dict.get("duration_ms", 0),
+                            status=rec_dict.get("status", "success"),
+                            error=rec_dict.get("error"),
+                        )
+                    )
+    except Exception as db_err:  # pragma: no cover
+        logger.warning("DB workflow completion persist failed: %s", db_err)
 
     return RunWorkflowResponse(
         status=result.get("status", "DONE"),
@@ -1312,6 +1408,21 @@ async def stream_agent_workflow(
                 "provider": PROVIDER_NAME,
             },
         )
+        # Persist stream run initial state
+        try:
+            with get_db_context() as db:
+                db.add(
+                    DbWorkflowRun(
+                        id=run_id,
+                        user_prompt=payload.user_prompt,
+                        status="RUNNING",
+                        provider=PROVIDER_NAME,
+                        model_name=payload.model or DEFAULT_GROQ_MODEL,
+                    )
+                )
+        except Exception as db_err:  # pragma: no cover
+            logger.warning("DB workflow stream start logging failed: %s", db_err)
+
         try:
             latest_obj_status = "SUCCESS"
             latest_final_summary = None
@@ -1363,6 +1474,17 @@ async def stream_agent_workflow(
                         },
                     )
 
+            # Persist stream run completion
+            try:
+                with get_db_context() as db:
+                    db_run = db.get(DbWorkflowRun, run_id)
+                    if db_run:
+                        db_run.status = "DONE"
+                        db_run.duration_ms = int((perf_counter() - run_started_at) * 1000)
+                        db_run.completed_at = datetime.now(timezone.utc)
+            except Exception as db_err:  # pragma: no cover
+                logger.warning("DB workflow stream completion logging failed: %s", db_err)
+
             yield emit(
                 "run_complete",
                 {
@@ -1390,6 +1512,19 @@ async def stream_agent_workflow(
             classification = _classify_exception(exc)
             exc_chain = _exception_chain(exc)
             run_duration_ms = int((perf_counter() - run_started_at) * 1000)
+
+            # Persist stream error
+            try:
+                with get_db_context() as db:
+                    db_run = db.get(DbWorkflowRun, run_id)
+                    if db_run:
+                        db_run.status = "FAILED"
+                        db_run.error_message = str(exc)
+                        db_run.duration_ms = run_duration_ms
+                        db_run.completed_at = datetime.now(timezone.utc)
+            except Exception as db_err:
+                logger.warning("DB workflow stream error logging failed: %s", db_err)
+
             error_details: dict[str, Any] = {
                 "run_duration_ms": run_duration_ms,
                 "run_id": run_id,
@@ -1422,3 +1557,79 @@ async def stream_agent_workflow(
             )
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Database-backed Run History Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/runs")
+def list_workflow_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """List historical workflow runs (paginated, newest first)."""
+    runs = (
+        db.query(DbWorkflowRun)
+        .order_by(DbWorkflowRun.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "user_prompt": r.user_prompt,
+            "status": r.status,
+            "provider": r.provider,
+            "model_name": r.model_name,
+            "duration_ms": r.duration_ms,
+            "total_tokens": r.total_tokens,
+            "error_message": r.error_message,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        }
+        for r in runs
+    ]
+
+
+@app.get("/v1/runs/{run_id}")
+def get_workflow_run(run_id: str, db: Session = Depends(get_db)):
+    """Retrieve full details of a specific workflow run including saved plans and audit logs."""
+    run = db.query(DbWorkflowRun).filter(DbWorkflowRun.id == run_id).first()
+    if not run:
+        return _error_response(404, "run_not_found", f"Workflow run '{run_id}' not found.")
+
+    return {
+        "id": run.id,
+        "user_prompt": run.user_prompt,
+        "status": run.status,
+        "provider": run.provider,
+        "model_name": run.model_name,
+        "duration_ms": run.duration_ms,
+        "total_tokens": run.total_tokens,
+        "error_message": run.error_message,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "plan": {
+            "app_name": run.plan.app_name,
+            "description": run.plan.description,
+            "techstack": run.plan.techstack,
+            "features": run.plan.features,
+            "task_steps": run.plan.task_steps,
+        } if run.plan else None,
+        "execution_records": [
+            {
+                "step_id": rec.step_id,
+                "tool_name": rec.tool_name,
+                "tool_args": rec.tool_args,
+                "tool_result": rec.tool_result,
+                "duration_ms": rec.duration_ms,
+                "status": rec.status,
+                "error": rec.error,
+                "executed_at": rec.executed_at.isoformat() if rec.executed_at else None,
+            }
+            for rec in run.execution_records
+        ],
+    }

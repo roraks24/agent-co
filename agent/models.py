@@ -27,11 +27,15 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+# Dialect-agnostic JSON column: JSONB on PostgreSQL, JSON on SQLite
+JsonType = JSON().with_variant(JSONB, "postgresql")
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +197,10 @@ class SavedPlan(Base):
     app_name = Column(String(255), nullable=True)
     description = Column(Text, nullable=True)
     techstack = Column(String(255), nullable=True)
-    features = Column(JSONB, nullable=True)       # list[str]
+    features = Column(JsonType, nullable=True)       # list[str]
 
     # From TaskPlan
-    task_steps = Column(JSONB, nullable=True)      # list[ImplementationStep dict]
+    task_steps = Column(JsonType, nullable=True)      # list[ImplementationStep dict]
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
@@ -231,7 +235,7 @@ class ExecutionRecord(Base):
 
     step_id = Column(String(50), nullable=True)  # e.g. "step-1"
     tool_name = Column(String(100), nullable=False)
-    tool_args = Column(JSONB, nullable=True)
+    tool_args = Column(JsonType, nullable=True)
     tool_result = Column(Text, nullable=True)
 
     duration_ms = Column(Integer, nullable=False, default=0)

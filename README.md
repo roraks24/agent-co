@@ -1,4 +1,4 @@
-# Agent Co — Autonomous Task Execution & Planning Platform
+# Agent Co - Autonomous Task Execution & Planning Platform
 
 ## What This Project Does
 Agent Co is an autonomous general-purpose agentic execution platform that generates software projects through a strict three-node workflow:
@@ -48,20 +48,41 @@ render.yaml                    # Render deployment blueprint
 ## Quick Start (Local Development)
 If you are new, do this first:
 
-1. Start backend.
-2. Start frontend.
-3. Open Studio, set API key.
-4. Run a simple prompt and inspect graph/logs/files.
+1. Start PostgreSQL (or use the built-in SQLite fallback).
+2. Run database migrations with Alembic.
+3. Start backend.
+4. Start frontend.
+5. Open Studio, set API key.
 
-Backend:
+### 1. Database (PostgreSQL)
+Start the local PostgreSQL container:
+```bash
+docker compose up -d postgres
+```
+Copy the example environment template:
+```bash
+cp .env.example .env
+```
+*(By default, `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/charito`. If PostgreSQL is not running, the application automatically falls back to SQLite).*
+
+### 2. Backend Setup & Migrations
 ```bash
 python -m venv venv
+# Windows:
 venv\Scripts\activate
+# Linux/macOS:
+# source venv/bin/activate
+
 pip install -r requirements.txt
+
+# Run database migrations to latest schema:
+alembic upgrade head
+
+# Start backend server:
 uvicorn agent.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Frontend:
+### 3. Frontend Setup
 ```bash
 cd frontend
 npm install
@@ -80,6 +101,9 @@ Need full internals? See [PROJECT_COMPLETE_TECHNICAL_DOCUMENTATION.md](./PROJECT
 ### Backend environment variables
 | Variable | Purpose | Typical production value |
 |---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host:5432/charito` |
+| `DB_POOL_SIZE` | Persistent connection pool size | `10` |
+| `DB_MAX_OVERFLOW` | Max pool overflow connections | `20` |
 | `APP_ENV` | Runtime mode | `production` |
 | `CORS_ALLOWED_ORIGINS` | Explicit browser allowlist (CSV) | `https://<your-vercel-domain>` |
 | `CORS_ALLOW_CREDENTIALS` | CORS credentials flag | `false` |
@@ -103,6 +127,10 @@ Notes:
 - `GET /prompts/schema`
 - `GET /v1/prompts/schema`
 - `GET /v1/prompt-policy`
+
+### Runs & Persistence
+- `GET /v1/runs` (list historical workflow runs)
+- `GET /v1/runs/{run_id}` (get run details, saved plan, and execution records)
 
 ### Workflow
 - `POST /generate`
