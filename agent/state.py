@@ -159,8 +159,23 @@ class ImplementationStep(BaseModel):
     task_description: str = Field(description="Single-string task details for this file.")
 
 
+class TaskStep(BaseModel):
+    id: int | str = Field(default=1)
+    file_path: str = Field(default="")
+    description: str = Field(default="")
+    task_description: str = Field(default="")
+    model_config = ConfigDict(extra="allow")
+
+    def __init__(self, **data: Any):
+        if "description" in data and "task_description" not in data:
+            data["task_description"] = data["description"]
+        elif "task_description" in data and "description" not in data:
+            data["description"] = data["task_description"]
+        super().__init__(**data)
+
+
 class TaskPlan(BaseModel):
-    implementation_steps: list[ImplementationStep] = Field(
+    implementation_steps: list[Any] = Field(
         description="Ordered implementation steps, one per file."
     )
     model_config = ConfigDict(extra="allow")

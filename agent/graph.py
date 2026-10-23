@@ -14,7 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from .prompts import resolve_node_prompt
+from .prompts import default_mutable_for_node, resolve_node_prompt
 from .state import (
     ActionExecutionRecord,
     ActionStep,
@@ -28,7 +28,7 @@ from .state import (
 )
 from .tools_registry import GLOBAL_TOOL_REGISTRY
 from .verification_engine import FactualVerifier, has_unresolved_placeholders
-from .workspace_service import read_text_file
+from .workspace import read_text_file
 
 logger = logging.getLogger("rorak.agent.graph")
 
@@ -38,6 +38,7 @@ EventCallback = Callable[[dict[str, Any]], None]
 def get_graph_schema() -> dict[str, Any]:
     """Return static representation of the 3-node LangGraph pipeline."""
     return {
+        "graph_id": "agent-co-pipeline",
         "nodes": [
             {"id": "planner", "label": "Task Planner", "role": "Objective understanding & task decomposition"},
             {"id": "architect", "label": "Architecture Engine", "role": "Step normalization & dependency validation"},
@@ -49,6 +50,8 @@ def get_graph_schema() -> dict[str, Any]:
             {"source": "coder", "target": "coder", "conditional": True, "label": "loop until steps completed"},
             {"source": "coder", "target": "__end__", "conditional": True, "label": "all steps verified"},
         ],
+        "state_model": ["idle", "active", "completed", "error"],
+        "activity_model": {"min": 0.0, "max": 1.0},
     }
 
 
@@ -58,7 +61,7 @@ def _resolve_node_mutable_prompt(state: AgentState, node_id: str) -> str:
         return prompt_overrides[node_id]
     if state.get("mutable_prompt") is not None:
         return str(state["mutable_prompt"])
-    return ""
+    return default_mutable_for_node(node_id)
 
 
 def _evaluate_goal_completion(
@@ -557,6 +560,10 @@ def _coder_agent(
             else:
                 result = GLOBAL_TOOL_REGISTRY.execute(tool_name, tool_args)
 
+            if isinstance(result, dict) and (result.get("success") is False or (result.get("error") and not result.get("success", True))):
+                status = "failed"
+                error_msg = str(result.get("error"))
+
         except Exception as exc:
             logger.warning("Tool execution error in %s: %s", tool_name, exc)
             status = "failed"
@@ -627,6 +634,26 @@ def build_agent(
     return graph.compile()
 
 
+def run_workflow(
+    user_prompt: str,
+    llm: BaseChatModel,
+    recursion_limit: int = 50,
+    mutable_prompt: Optional[str] = None,
+    prompt_overrides: Optional[dict[str, str]] = None,
+    workspace_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Execute LangGraph workflow synchronously."""
+    app = build_agent(llm)
+    init_state: AgentState = {
+        "user_prompt": user_prompt,
+        "mutable_prompt": mutable_prompt,
+        "prompt_overrides": prompt_overrides or {},
+        "workspace_id": workspace_id,
+        "messages": [],
+    }
+    return app.invoke(init_state, config={"recursion_limit": recursion_limit})
+
+
 async def astream_workflow(
     user_prompt: str,
     llm: BaseChatModel,
@@ -647,8 +674,8 @@ async def astream_workflow(
 
     async for item in app.astream(
         init_state,
+        {"recursion_limit": recursion_limit},
         stream_mode=["debug", "messages", "updates"],
-        config={"recursion_limit": recursion_limit},
         debug=True,
         subgraphs=True,
     ):

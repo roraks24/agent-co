@@ -1,4 +1,4 @@
-# Agent Co � Autonomous Task Execution & Planning Platform
+# Agent Co � Autonomous Task Execution & Planning Platform
 
 ## What This Project Does
 Agent Co is an autonomous general-purpose agentic execution platform that generates software projects through a strict three-node workflow:
@@ -27,11 +27,18 @@ The system exposes synchronous (`/generate`) and streaming (`/stream`) workflow 
 
 ## Architecture at a Glance
 ```mermaid
-flowchart LR
-  A["Browser (Vite/React + Zustand)"] -->|"HTTP + SSE\nX-API-KEY / X-Workspace-ID"| B["FastAPI Backend"]
-  B -->|"LLM calls"| C["Groq Provider"]
-  B -->|"read/write/list/tree/zip"| D["Session Workspace (temp FS)"]
-  B --> E["LangGraph Workflow\nplanner -> architect -> coder (loop)"]
+flowchart TD
+  A["User Request & Metadata\n(prompt, quality, budget, latency)"] --> B["FastAPI Intake (/generate, /stream)"]
+  B --> C["Adaptive API Selection Pipeline"]
+  subgraph C ["Adaptive API Selection Pipeline"]
+    C1["Task Classifier\n(LOW / MEDIUM / HIGH)"] --> C2["Requirement Extractor\n(context, modalities, latency, cost)"]
+    C2 --> C3["API Registry\n(multi-provider catalog)"]
+    C3 --> C4["Selection Engine\n(weighted scoring & strict routing)"]
+    C4 --> C5["Execution & Fallback Handler\n(retry next-best candidate on failure)"]
+  end
+  C5 --> D["Selected Provider / Model\n(Groq, OpenAI, Anthropic, Google, DeepSeek, Local)"]
+  D --> E["LangGraph Workflow\nplanner -> architect -> coder (loop)"]
+  E --> F["Audited Execution & Deliverables\n(selection metadata + SSE events)"]
 ```
 
 ## Repository Structure
@@ -147,6 +154,155 @@ Recommended smoke checks:
 1. `GET /health` returns expected env flags.
 2. `/studio` can start a stream run and show node transitions.
 3. Generated files appear in tree and ZIP download works.
+
+## Adaptive API Selection Pipeline
+
+Agent Co incorporates an intelligent **Adaptive API Selection Pipeline** that dynamically selects the optimal model, provider, and credentials based on task complexity, performance requirements, latency limits, and budget constraints.
+
+### How the Pipeline Works
+
+```text
+User Request (+ optional metadata)
+               │
+               ▼
+   [ 1. Request Intake ] ──────────────► Normalizes prompt, latency, quality, budget, files
+               │
+               ▼
+   [ 2. Task Classifier ] ─────────────► Classifies into LOW, MEDIUM, or HIGH complexity tier
+               │
+               ▼
+   [ 3. Requirement Extractor ] ───────► Computes context size, output tokens, modalities, constraints
+               │
+               ▼
+   [ 4. API Registry ] ────────────────► Discovers registered models and verifies available credentials
+               │
+               ▼
+   [ 5. Selection Engine ] ────────────► Weighted multi-criteria scoring with strict routing rules
+               │
+               ▼
+   [ 6. Execution & Fallback ] ────────► Invokes model; automatically fails over to next-best candidate
+               │
+               ▼
+   [ 7. Observability & Metadata ] ────► Returns audited selection metadata, cost tier, and latency
+```
+
+### Task Classification Tiers
+
+| Tier | Characteristics & Use Cases | Target Model Tier | Example Candidates |
+|---|---|---|---|
+| **LOW** | Simple Q&A, definitions, formatting JSON/Markdown, short summaries, basic code edits, text classification. | Lightweight / Ultra-fast | `groq/llama-3.1-8b-instant`, `groq/gemma2-9b-it`, `local/llama3.2:3b` |
+| **MEDIUM** | Multi-step reasoning, single-file scripts, data calculation, web search, tool use. | Balanced / Versatile | `groq/llama-3.3-70b-versatile`, `groq/openai/gpt-oss-120b`, `openai/gpt-4o-mini` |
+| **HIGH** | Complex system planning, deep research reports, multi-file codebases, formal verification, multimodal vision, >8k context. | High-Performance / Frontier | `openai/gpt-4o`, `anthropic/claude-3-5-sonnet`, `google/gemini-1.5-pro`, `openai/o1-mini` |
+
+### Core Routing & Guard Rules
+
+1. **Lightweight Task Guard**: Never use a high-performance frontier model for a task that can be completed adequately by a lightweight API (prevents unnecessary compute cost and token waste).
+2. **Complexity Guard**: Never route a complex task to a model likely to fail, truncate output, or hallucinate under complex requirements.
+3. **Modal Alignment**: Tasks requiring image analysis, diagrams, or file attachments automatically route to multimodal models supporting `Modality.VISION`.
+4. **Cost Tie-Breaker**: When multiple candidates qualify for a tier, the engine selects the lowest-cost model that satisfies the latency and quality criteria.
+5. **Sensible Ambiguity Defaults**: If a prompt is ambiguous or lacks strong complexity cues, it defaults to the balanced `MEDIUM` tier with clear log signals.
+
+### Automated Fault Tolerance & Fallback
+
+If the selected API encounters an error (rate limits, timeouts, upstream 5xx, or authentication rejection):
+- The pipeline immediately catches the failure without crashing the workflow.
+- Request context is completely preserved.
+- The next-best eligible candidate from the `fallback_chain` is invoked.
+- The final response records `fallback_used: true` and logs the sanitized fallback event trail.
+
+### How to Configure API Keys Securely
+
+Credentials are **never hardcoded** in code or stored on model entries. You can supply API keys through either:
+
+1. **Environment Variables**: Copy `.env.example` to `.env` and set the required provider keys:
+   ```bash
+   GROQ_API_KEY=gsk_your_groq_api_key_here
+   OPENAI_API_KEY=sk-your_openai_api_key_here
+   ANTHROPIC_API_KEY=sk-ant-your_anthropic_api_key_here
+   GEMINI_API_KEY=your_gemini_api_key_here
+   DEEPSEEK_API_KEY=sk-your_deepseek_api_key_here
+   ```
+2. **HTTP Header / Request Payload**: Pass `X-API-KEY` or `api_key` in the request body. The pipeline resolves the key to the matching provider.
+3. **Secret Scrubbing**: All logs, exceptions, and response payloads automatically sanitize API keys using `sanitize_secrets`, replacing credential patterns with `***REDACTED_SECRET***`.
+
+### How to Add a New API Provider or Model
+
+To add a new model or custom endpoint, register an `ApiRegistryEntry` in `agent/adaptive/registry.py`:
+
+```python
+from agent.adaptive import ApiRegistryEntry, CostTier, LatencyTier, Modality, TaskTier, GLOBAL_ADAPTIVE_PIPELINE
+
+new_model = ApiRegistryEntry(
+    id="myprovider/custom-model",
+    provider="custom",
+    model_name="custom-model-v1",
+    capability_tier=TaskTier.MEDIUM,
+    context_window=64000,
+    max_output_tokens=4096,
+    supported_modalities=[Modality.TEXT, Modality.TOOLS],
+    cost_tier=CostTier.LOW,
+    latency_tier=LatencyTier.FAST,
+    required_env_vars=["CUSTOM_PROVIDER_API_KEY"],
+    base_url="https://api.myprovider.com/v1",
+    description="Custom model endpoint for enterprise internal deployments."
+)
+
+# Register into the global pipeline:
+GLOBAL_ADAPTIVE_PIPELINE.registry.register(new_model)
+```
+
+### Example Requests & Routing Behavior
+
+#### 1. Low-Complexity Request (Formatting / Q&A)
+```json
+POST /generate
+{
+  "user_prompt": "What is an abstract base class in Python? Summarize in 2 sentences.",
+  "api_key": "gsk_..."
+}
+```
+**Response metadata:**
+```json
+{
+  "adaptive_selection": {
+    "selected_api": "groq/llama-3.1-8b-instant",
+    "provider": "groq",
+    "model": "llama-3.1-8b-instant",
+    "task_tier": "LOW",
+    "confidence": 0.86,
+    "reason": "Routed to groq/llama-3.1-8b-instant (lightweight/cost-effective) matching classified LOW tier.",
+    "fallback_used": false
+  }
+}
+```
+
+#### 2. High-Complexity Request (System Architecture / Deep Research)
+```json
+POST /generate
+{
+  "user_prompt": "Design an enterprise microservices architecture with comprehensive deep research and security audit.",
+  "api_key": "sk-..."
+}
+```
+**Response metadata:**
+```json
+{
+  "adaptive_selection": {
+    "selected_api": "openai/gpt-4o",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "task_tier": "HIGH",
+    "confidence": 0.95,
+    "reason": "Routed to openai/gpt-4o (high-performance reasoning) matching classified HIGH tier.",
+    "fallback_used": false
+  }
+}
+```
+
+### Dedicated Adaptive Endpoints
+- `POST /v1/adaptive/classify`: Evaluates a prompt and returns its task tier, confidence, and linguistic signals.
+- `POST /v1/adaptive/select`: Evaluates requirements and returns ranked candidate scores and fallback order.
+- `GET /v1/adaptive/registry`: Returns catalog of available models, capability tiers, and health status (without exposing secrets).
 
 ## Deployment (Render + Vercel)
 ### Backend on Render

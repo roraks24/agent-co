@@ -285,6 +285,12 @@ class FactualVerifier:
 
         # Validate each deliverable for software quality, completeness, and placeholders
         for target_path, content in file_contents.items():
+            placeholders = has_unresolved_placeholders(content)
+            if placeholders:
+                deliverable_status = "FAILED"
+                unverified_claims.append(f"Unresolved template placeholder in deliverable '{target_path}': {placeholders[0]}")
+                criteria_evaluated.append(f"Deliverable '{target_path}' contains {len(placeholders)} unresolved template placeholders.")
+
             software_issues = validate_software_deliverable(target_path, content, file_contents)
             if software_issues:
                 deliverable_status = "FAILED"

@@ -74,6 +74,10 @@ def default_mutable_for_node(node_id: str) -> str:
     return _get_node_prompt(node_id).default_mutable
 
 
+def resolve_node_prompt(node_id: str, mutable_layer: str | None = None) -> str:
+    return get_composed_prompt(node_id, mutable_layer, "")
+
+
 def get_composed_prompt(node_id: str, user_content: str | None, context_block: str) -> str:
     node_prompt = _get_node_prompt(node_id)
     mutable_text = _normalize_mutable_layer(user_content, node_prompt.default_mutable)

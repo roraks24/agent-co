@@ -38,6 +38,11 @@ try:  # pragma: no cover - supports script execution
     from .tools_registry import GLOBAL_TOOL_REGISTRY
     from .security_config import SecurityConfig, load_security_config
     from . import workspace as workspace_service
+    from .adaptive import (
+        GLOBAL_ADAPTIVE_PIPELINE,
+        TaskIntakeRequest,
+        build_response_selection_metadata,
+    )
 except ImportError:  # pragma: no cover
     from graph import astream_workflow, get_graph_schema, run_workflow
     from llm_factory import DEFAULT_GROQ_MODEL, PROVIDER_NAME, build_chat_model
@@ -51,6 +56,11 @@ except ImportError:  # pragma: no cover
     from tools_registry import GLOBAL_TOOL_REGISTRY
     from security_config import SecurityConfig, load_security_config
     import workspace as workspace_service
+    from adaptive import (
+        GLOBAL_ADAPTIVE_PIPELINE,
+        TaskIntakeRequest,
+        build_response_selection_metadata,
+    )
 
 logger = logging.getLogger(__name__)
 SECURITY_CONFIG: SecurityConfig = load_security_config()
@@ -78,6 +88,14 @@ class RunWorkflowRequest(BaseModel):
     workspace_id: str | None = None
     model: str | None = None
     recursion_limit: int = Field(default=100, ge=1, le=1000)
+    task_type: str | None = None
+    desired_quality: str | None = None
+    max_latency: float | None = None
+    budget: str | float | None = None
+    context_length: int | None = None
+    file_inputs: list[Any] | None = None
+    modalities: list[str] | None = None
+    preferred_provider: str | None = None
 
 
 class RunWorkflowResponse(BaseModel):
@@ -91,6 +109,7 @@ class RunWorkflowResponse(BaseModel):
     objective_status: str | None = None
     final_summary: str | None = None
     verification: VerificationResult | None = None
+    adaptive_selection: dict[str, Any] | None = None
 
 
 class WorkspaceTreeResponse(BaseModel):
@@ -775,6 +794,12 @@ def _resolve_api_key(payload: RunWorkflowRequest, header_api_key: str | None) ->
     token = body_token or header_token
     if token:
         return token
+    # Fall back to server environment variables if configured
+    import os
+    for env_var in ("GROQ_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+        val = os.getenv(env_var, "").strip()
+        if val:
+            return val
     raise ValueError("api_key is required in body or X-API-KEY header.")
 
 
@@ -1156,7 +1181,33 @@ async def run_agent_workflow(
             header_workspace_id=x_workspace_id,
             request_workspace_id=payload.workspace_id,
         )
-        llm = build_chat_model(api_key=api_key, model=payload.model)
+        intake_req = TaskIntakeRequest(
+            user_prompt=payload.user_prompt,
+            task_type=payload.task_type,
+            desired_quality=payload.desired_quality,
+            max_latency=payload.max_latency,
+            budget=payload.budget,
+            context_length=payload.context_length,
+            file_inputs=payload.file_inputs,
+            modalities=payload.modalities,
+            preferred_provider=payload.preferred_provider,
+            preferred_model=payload.model if (payload.model and payload.model != "adaptive") else None,
+            api_key=api_key,
+        )
+        adaptive_decision, _reqs = GLOBAL_ADAPTIVE_PIPELINE.route(intake_req)
+
+        if payload.model and payload.model != "adaptive":
+            effective_model = payload.model
+            effective_provider = None
+        else:
+            effective_model = adaptive_decision.model
+            effective_provider = adaptive_decision.provider
+
+        llm = build_chat_model(
+            api_key=api_key,
+            model=effective_model,
+            provider=effective_provider,
+        )
         with workspace_service.workspace_context(workspace_session.workspace_id):
             result = await run_in_threadpool(
                 run_workflow,
@@ -1188,7 +1239,7 @@ async def run_agent_workflow(
 
     return RunWorkflowResponse(
         status=result.get("status", "DONE"),
-        provider=PROVIDER_NAME,
+        provider=effective_provider or PROVIDER_NAME,
         workspace_id=workspace_session.workspace_id if workspace_session else None,
         plan=result.get("plan"),
         task_plan=result.get("detailed_ins"),
@@ -1197,6 +1248,7 @@ async def run_agent_workflow(
         objective_status=result.get("objective_status"),
         final_summary=result.get("final_summary"),
         verification=result.get("verification"),
+        adaptive_selection=build_response_selection_metadata(adaptive_decision),
     )
 
 
@@ -1217,7 +1269,33 @@ async def stream_agent_workflow(
             header_workspace_id=x_workspace_id,
             request_workspace_id=payload.workspace_id,
         )
-        llm = build_chat_model(api_key=api_key, model=payload.model)
+        intake_req = TaskIntakeRequest(
+            user_prompt=payload.user_prompt,
+            task_type=payload.task_type,
+            desired_quality=payload.desired_quality,
+            max_latency=payload.max_latency,
+            budget=payload.budget,
+            context_length=payload.context_length,
+            file_inputs=payload.file_inputs,
+            modalities=payload.modalities,
+            preferred_provider=payload.preferred_provider,
+            preferred_model=payload.model if (payload.model and payload.model != "adaptive") else None,
+            api_key=api_key,
+        )
+        adaptive_decision, _reqs = GLOBAL_ADAPTIVE_PIPELINE.route(intake_req)
+
+        if payload.model and payload.model != "adaptive":
+            effective_model = payload.model
+            effective_provider = None
+        else:
+            effective_model = adaptive_decision.model
+            effective_provider = adaptive_decision.provider
+
+        llm = build_chat_model(
+            api_key=api_key,
+            model=effective_model,
+            provider=effective_provider,
+        )
     except ValueError as exc:
         return _error_response(422, "invalid_request", str(exc))
 
@@ -1309,8 +1387,12 @@ async def stream_agent_workflow(
                 },
                 "namespace": None,
                 "raw": None,
-                "provider": PROVIDER_NAME,
+                "provider": effective_provider or PROVIDER_NAME,
             },
+        )
+        yield emit(
+            "adaptive_selection",
+            build_response_selection_metadata(adaptive_decision),
         )
         try:
             latest_obj_status = "SUCCESS"
@@ -1430,3 +1512,29 @@ async def stream_agent_workflow(
             )
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/v1/adaptive/classify")
+def adaptive_classify_endpoint(request: TaskIntakeRequest) -> dict[str, Any]:
+    """Classify prompt into LOW, MEDIUM, or HIGH task tier with confidence and signals."""
+    classification = GLOBAL_ADAPTIVE_PIPELINE.classifier.classify(request)
+    return classification.model_dump()
+
+
+@app.post("/v1/adaptive/select")
+def adaptive_select_endpoint(request: TaskIntakeRequest) -> dict[str, Any]:
+    """Evaluate and select optimal API/model key with scored candidate rankings and fallback chain."""
+    decision, reqs = GLOBAL_ADAPTIVE_PIPELINE.route(request)
+    return {
+        "decision": decision.model_dump(),
+        "requirements": reqs.model_dump(),
+        "metadata": build_response_selection_metadata(decision),
+    }
+
+
+@app.get("/v1/adaptive/registry")
+def adaptive_registry_endpoint() -> list[dict[str, Any]]:
+    """List available models, capability tiers, context windows, and health statuses (no secrets)."""
+    models = GLOBAL_ADAPTIVE_PIPELINE.registry.list_all(enabled_only=False)
+    return [m.model_dump(exclude={"required_env_vars"}) for m in models]
+
