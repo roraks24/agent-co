@@ -101,6 +101,10 @@ class ListFilesInput(BaseModel):
     directory: str = Field(default=".", description="Relative directory path to list (default: root).")
 
 
+class WikipediaSummaryInput(BaseModel):
+    title: str = Field(..., min_length=1, max_length=300, description="Article title or topic to look up on Wikipedia.")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Implementations
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,6 +308,18 @@ def execute_read_file(path: str) -> dict[str, Any]:
         }
 
 
+def execute_wikipedia_summary(title: str) -> dict[str, Any]:
+    """Execute Wikipedia summary lookup using the search utility module."""
+    clean_title = title.strip()
+    if not clean_title:
+        raise ValueError("title must not be empty.")
+    try:
+        from .search import search_wikipedia_summary
+    except ImportError:  # pragma: no cover
+        from search import search_wikipedia_summary
+    return search_wikipedia_summary(clean_title)
+
+
 def execute_list_files(directory: str = ".") -> dict[str, Any]:
     """List relative files inside the active session workspace."""
     try:
@@ -448,6 +464,18 @@ class ToolRegistry:
                 schema=ReadFileInput,
                 restrictions="Restricted to the active session workspace. Binary files are rejected.",
                 handler=execute_read_file,
+            )
+        )
+        self.register(
+            ToolDefinition(
+                name="wikipedia_summary",
+                description=(
+                    "Fetch a structured article summary from the Wikipedia REST API for a topic or title. "
+                    "Returns title, description, extract, and page URL."
+                ),
+                schema=WikipediaSummaryInput,
+                restrictions="Read-only public Wikipedia REST API.",
+                handler=execute_wikipedia_summary,
             )
         )
         self.register(

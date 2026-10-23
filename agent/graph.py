@@ -31,7 +31,7 @@ try:
         TaskPlan,
         VerificationResult,
     )
-    from .tools import list_files, read_file, write_file
+    from .tools import get_wikipedia_summary, list_files, read_file, search_web, write_file
     from .tools_registry import GLOBAL_TOOL_REGISTRY, redact_sensitive_data
     from .workspace import read_text_file
 except ImportError:  # pragma: no cover
@@ -53,7 +53,7 @@ except ImportError:  # pragma: no cover
         TaskPlan,
         VerificationResult,
     )
-    from tools import list_files, read_file, write_file
+    from tools import get_wikipedia_summary, list_files, read_file, search_web, write_file
     from tools_registry import GLOBAL_TOOL_REGISTRY, redact_sensitive_data
     from workspace import read_text_file
 
@@ -82,7 +82,7 @@ def _list_workspace_files(_: str = ".") -> str:
 
 
 def _build_coder_tools() -> list[Any]:
-    return [read_file, write_file, _list_workspace_files]
+    return [read_file, write_file, _list_workspace_files, search_web, get_wikipedia_summary]
 
 
 def _goal_plan_from_legacy_plan(plan: Plan) -> GoalPlan:
@@ -334,7 +334,9 @@ def _architect_agent(
             for step in goal_plan.steps:
                 if step.tool_name not in registered_tool_names:
                     name_lower = step.tool_name.lower()
-                    if "search" in name_lower:
+                    if "wiki" in name_lower:
+                        step.tool_name = "wikipedia_summary"
+                    elif "search" in name_lower:
                         step.tool_name = "web_search"
                     elif "fetch" in name_lower or "url" in name_lower:
                         step.tool_name = "fetch_url_content"
@@ -506,6 +508,10 @@ def _coder_agent(
                     content = getattr(content_resp, "content", str(content_resp))
 
                 result = GLOBAL_TOOL_REGISTRY.execute("write_file", {"path": path, "content": content})
+
+            elif tool_name in ("wikipedia_summary", "get_wikipedia_summary"):
+                title = tool_args.get("title") or tool_args.get("query") or goal_plan.objective
+                result = GLOBAL_TOOL_REGISTRY.execute("wikipedia_summary", {"title": title})
 
             elif tool_name == "web_search":
                 query = tool_args.get("query") or goal_plan.objective

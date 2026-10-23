@@ -12,3 +12,4 @@ langsmith
 ddgs
 beautifulsoup4
 httpx
+requests
