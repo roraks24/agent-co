@@ -88,6 +88,10 @@ class FetchUrlInput(BaseModel):
     max_chars: int = Field(default=4000, ge=100, le=10000, description="Max characters to return.")
 
 
+class GitHubRepoInput(BaseModel):
+    repo: str = Field(..., min_length=3, description="GitHub repository in owner/repo format, e.g. langchain-ai/langgraph.")
+
+
 class WriteFileInput(BaseModel):
     path: str = Field(..., min_length=1, description="Relative path in the session workspace.")
     content: str = Field(..., description="Full text content to write to the file.")
@@ -271,6 +275,71 @@ def execute_fetch_url(url: str, max_chars: int = 4000) -> dict[str, Any]:
     }
 
 
+def execute_get_github_repo_metadata(repo: str) -> dict[str, Any]:
+    """Retrieve verified official metadata from the public GitHub REST API."""
+    clean_repo = repo.strip().replace("https://github.com/", "").strip("/")
+    parts = clean_repo.split("/")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid repository specification: {repo}. Expected format: owner/repo.")
+    owner, repo_name = parts
+    target_repo = f"{owner}/{repo_name}"
+
+    import json
+    import urllib.request
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    headers = {"User-Agent": "AgentCo-Research/1.0", "Accept": "application/vnd.github.v3+json"}
+    base_url = f"https://api.github.com/repos/{target_repo}"
+
+    result_data: dict[str, Any] = {
+        "repo": target_repo,
+        "repo_url": f"https://github.com/{target_repo}",
+        "observation_date": now_date,
+        "observed_at": now_iso,
+    }
+
+    try:
+        req = urllib.request.Request(base_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            repo_json = json.loads(resp.read().decode("utf-8"))
+            result_data["stars"] = repo_json.get("stargazers_count")
+            result_data["forks"] = repo_json.get("forks_count")
+            result_data["open_issues"] = repo_json.get("open_issues_count")
+            result_data["description"] = repo_json.get("description")
+            result_data["default_branch"] = repo_json.get("default_branch")
+            license_obj = repo_json.get("license") or {}
+            result_data["license_spdx"] = license_obj.get("spdx_id")
+            result_data["license_name"] = license_obj.get("name")
+            result_data["archived"] = repo_json.get("archived", False)
+    except Exception as exc:
+        logger.warning("Failed to fetch repository metadata for %s: %s", target_repo, exc)
+        raise ValueError(f"Could not retrieve GitHub repository metadata for {target_repo}: {exc}")
+
+    # Also attempt to retrieve latest release
+    try:
+        rel_req = urllib.request.Request(f"{base_url}/releases/latest", headers=headers)
+        with urllib.request.urlopen(rel_req, timeout=5) as resp:
+            rel_json = json.loads(resp.read().decode("utf-8"))
+            result_data["latest_release_tag"] = rel_json.get("tag_name")
+            result_data["latest_release_name"] = rel_json.get("name")
+            result_data["latest_release_published_at"] = rel_json.get("published_at")
+    except Exception:
+        # Fall back to PyPI version query for python packages
+        package_name = repo_name.lower()
+        try:
+            pypi_req = urllib.request.Request(f"https://pypi.org/pypi/{package_name}/json", headers=headers)
+            with urllib.request.urlopen(pypi_req, timeout=5) as resp:
+                pypi_json = json.loads(resp.read().decode("utf-8"))
+                result_data["pypi_version"] = pypi_json.get("info", {}).get("version")
+        except Exception:
+            result_data["latest_release_tag"] = None
+
+    return result_data
+
+
 def execute_write_file(path: str, content: str) -> dict[str, Any]:
     """Write text file inside the active session workspace."""
     relative_path = write_text_file(path, content)
@@ -415,6 +484,18 @@ class ToolRegistry:
                 schema=WebSearchInput,
                 restrictions="Read-only outbound search queries. Max 10 results per query.",
                 handler=execute_web_search,
+            )
+        )
+        self.register(
+            ToolDefinition(
+                name="get_github_repo_metadata",
+                description=(
+                    "Retrieve official GitHub repository metadata (verified star count, forks, official license SPDX ID, "
+                    "latest release tag and publish date). Essential for factual framework research."
+                ),
+                schema=GitHubRepoInput,
+                restrictions="Public repositories on github.com only. Non-destructive.",
+                handler=execute_get_github_repo_metadata,
             )
         )
         self.register(

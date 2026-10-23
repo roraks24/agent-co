@@ -107,12 +107,12 @@ def planner_prompt(user_prompt: str, mutable_layer: str | None = None) -> str:
         "Objective Planning Instructions:\n"
         "Analyze the user's objective and formulate an ordered GoalPlan with executable ActionSteps.\n"
         "Supported task types: 'research', 'coding', 'analysis', 'general'.\n"
-        "Available registered tools: 'web_search', 'fetch_url_content', 'write_file', 'read_file', 'list_files'.\n"
+        "Available registered tools: 'get_github_repo_metadata', 'web_search', 'fetch_url_content', 'write_file', 'read_file', 'list_files'.\n"
         "Rules:\n"
-        "1. For research/comparison tasks: Include web_search step(s) followed by a write_file step for the Markdown report.\n"
+        "1. For open-source framework research / comparison tasks: Start with 'get_github_repo_metadata' for each target project (e.g. repo: 'langchain-ai/langgraph', 'crewAIInc/crewAI', 'microsoft/autogen') to retrieve official star counts, licenses, and releases. Follow with 'web_search' for architectural trade-offs, and conclude with 'write_file' for the grounded Markdown report.\n"
         "2. For coding tasks: Include write_file steps for source code, requirements.txt, and README.md.\n"
         "3. Provide clear expected outcomes and success criteria for each step.\n"
-        "4. Tool arguments must be valid (e.g. web_search needs 'query'; write_file needs 'path')."
+        "4. Tool arguments must be valid (e.g. get_github_repo_metadata needs 'repo'; web_search needs 'query'; write_file needs 'path')."
     )
     return get_composed_prompt(
         "planner",

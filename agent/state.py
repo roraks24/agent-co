@@ -84,10 +84,35 @@ class ActionExecutionRecord(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class SourceEvidence(BaseModel):
+    """Structured verifiable source citation collected during task execution."""
+    url: str = Field(description="Normalized URL of the retrieved source.")
+    title: Optional[str] = Field(default=None, description="Title of the source page or document.")
+    status: str = Field(default="retrieved", description="Retrieval status: retrieved, failed, cached.")
+    observation_date: str = Field(description="ISO date or timestamp when the evidence was observed.")
+    relevant_excerpt: str = Field(description="Verified excerpt or raw facts extracted from the source.")
+    claim_topics: list[str] = Field(default_factory=list, description="Topics/entities supported (e.g. ['langgraph', 'stars']).")
+    is_official_source: bool = Field(default=False, description="True if from official GitHub, PyPI, or project docs.")
+
+    model_config = ConfigDict(extra="allow")
+
+
 class VerificationResult(BaseModel):
-    """Assessment of whether execution evidence satisfies the user's objective."""
+    """Multi-dimensional assessment of whether execution evidence satisfies the user's objective."""
     objective_status: str = Field(
-        description="Final status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
+        description="Final overall status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
+    )
+    execution_status: str = Field(
+        default="SUCCESS",
+        description="Execution completion status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
+    )
+    deliverable_status: str = Field(
+        default="SUCCESS",
+        description="Deliverable validation status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
+    )
+    source_verification_status: str = Field(
+        default="SUCCESS",
+        description="Source verification status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
     )
     criteria_evaluated: list[str] = Field(
         default_factory=list,
@@ -95,6 +120,14 @@ class VerificationResult(BaseModel):
     )
     evidence_summary: str = Field(
         description="Summary of facts and tool outputs supporting the determination."
+    )
+    unverified_claims: list[str] = Field(
+        default_factory=list,
+        description="List of specific claims or metrics that could not be verified."
+    )
+    verified_sources: list[str] = Field(
+        default_factory=list,
+        description="List of verified URLs used in the assessment."
     )
     feedback: Optional[str] = Field(
         default=None,
@@ -164,6 +197,7 @@ class AgentState(TypedDict, total=False):
     task_type: str
     goal_plan: GoalPlan
     execution_records: list[ActionExecutionRecord]
+    source_evidence: list[SourceEvidence]
     current_step_idx: int
     verification: VerificationResult
     objective_status: str

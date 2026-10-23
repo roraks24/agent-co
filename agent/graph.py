@@ -13,6 +13,7 @@ from langgraph.constants import END
 from langgraph.graph import StateGraph
 
 try:
+    from .verification_engine import FactualVerifier
     from .prompts import (
         architecture_prompt,
         coder_system_prompt,
@@ -35,6 +36,7 @@ try:
     from .tools_registry import GLOBAL_TOOL_REGISTRY, redact_sensitive_data
     from .workspace import read_text_file
 except ImportError:  # pragma: no cover
+    from verification_engine import FactualVerifier
     from prompts import (
         architecture_prompt,
         coder_system_prompt,
@@ -132,77 +134,8 @@ def _evaluate_goal_completion(
     execution_records: list[ActionExecutionRecord],
 ) -> VerificationResult:
     """Evaluate objective fulfillment against actual tool execution evidence."""
-    total_steps = len(goal_plan.steps)
-    successful_steps = [r for r in execution_records if r.status == "success"]
-    failed_steps = [r for r in execution_records if r.status in ("failed", "error")]
-
-    criteria_evaluated: list[str] = [
-        f"Step completion: {len(successful_steps)} of {total_steps} planned steps succeeded."
-    ]
-
-    # Verify workspace deliverables
-    write_steps = [s for s in goal_plan.steps if s.tool_name == "write_file"]
-    deliverables_verified = True
-    for ws in write_steps:
-        target_path = ws.tool_args.get("path")
-        if target_path:
-            try:
-                content = read_text_file(target_path)
-                if len(content.strip()) > 10:
-                    criteria_evaluated.append(
-                        f"Deliverable verified: '{target_path}' exists ({len(content)} chars)."
-                    )
-                else:
-                    deliverables_verified = False
-                    criteria_evaluated.append(
-                        f"Deliverable warning: '{target_path}' exists but is empty or too brief."
-                    )
-            except Exception:
-                deliverables_verified = False
-                criteria_evaluated.append(
-                    f"Deliverable missing: '{target_path}' was not found in the workspace."
-                )
-
-    # Verify search evidence
-    search_steps = [s for s in goal_plan.steps if s.tool_name == "web_search"]
-    search_verified = True
-    for ss in search_steps:
-        rec = next((r for r in execution_records if r.step_id == ss.id and r.status == "success"), None)
-        if rec and isinstance(rec.tool_result, dict) and rec.tool_result.get("count", 0) > 0:
-            criteria_evaluated.append(
-                f"Evidence verified: search query yielded {rec.tool_result.get('count')} results."
-            )
-        else:
-            search_verified = False
-            criteria_evaluated.append(
-                f"Evidence warning: search step '{ss.id}' yielded 0 results or had no verified output."
-            )
-
-    # Determine objective status
-    if len(failed_steps) == 0 and deliverables_verified and search_verified and len(successful_steps) >= total_steps:
-        objective_status = "SUCCESS"
-        summary = (
-            f"Objective successfully achieved: all {total_steps} planned actions completed "
-            f"with verified evidence and workspace deliverables."
-        )
-    elif len(successful_steps) > 0 and (deliverables_verified or len(write_steps) == 0):
-        objective_status = "PARTIAL_SUCCESS"
-        summary = (
-            f"Objective partially satisfied: {len(successful_steps)}/{total_steps} actions completed, "
-            f"primary deliverables exist, with minor warnings."
-        )
-    else:
-        objective_status = "FAILED"
-        summary = (
-            f"Objective failed: {len(failed_steps)} step(s) encountered unrecoverable errors."
-        )
-
-    return VerificationResult(
-        objective_status=objective_status,
-        criteria_evaluated=criteria_evaluated,
-        evidence_summary=summary,
-        feedback=None if objective_status == "SUCCESS" else "Review failed steps in the execution log.",
-    )
+    verifier = FactualVerifier(goal_plan, execution_records)
+    return verifier.evaluate()
 
 
 def _generate_deliverable_summary(
@@ -496,11 +429,14 @@ def _coder_agent(
                         f"Step Task: {step.title}\n"
                         f"Expected Outcome: {step.expected_outcome}\n"
                         f"Target File: {path}\n\n"
-                        f"Collected Tool Evidence:\n{evidence_str or 'No external evidence needed.'}\n\n"
-                        "Instruction: Write the complete, high-quality, professional content for this file. "
-                        "If this is a research report or comparison, write a comprehensive Markdown document "
-                        "with executive summary, detailed framework comparison table, architecture deep-dive, and recommendations. "
-                        "Do not include conversational preamble. Output ONLY the file content."
+                        f"Collected Tool Evidence:\n{evidence_str}\n\n"
+                        "Instruction: Write a comprehensive, factual, research-backed Markdown document adhering strictly to these requirements:\n"
+                        "1. Structure: Executive Summary, Clearly Defined Comparison Criteria, Populated Framework Comparison Table, Architecture Deep-Dive, and Limitations / Unverified Claims.\n"
+                        "2. Source Grounding: Every important factual claim (version, GitHub star count, license, release date) MUST link to an actual source URL from the collected evidence above using standard markdown links [Source Name](URL).\n"
+                        "3. Quantitative Metrics: Report exact numbers only when supported by the evidence above (e.g. GitHub star counts observed with observation date). If an exact metric is unknown or unretrieved, explicitly mark it as \"Unverified\" or omit it. DO NOT manufacture values.\n"
+                        "4. Licensing & Releases: Clearly state the official SPDX license ID from the repository metadata. Distinguish package versions from repository tags.\n"
+                        "5. Honest Categorization: If comparing general-purpose frameworks, do not misrepresent API features or plugins as standalone frameworks. Explain category differences explicitly.\n"
+                        "Output ONLY the complete Markdown document without any conversational preamble or meta-commentary."
                     )
                     content_resp = llm.invoke(synthesis_prompt)
                     content = getattr(content_resp, "content", str(content_resp))
@@ -520,6 +456,10 @@ def _coder_agent(
                 result = GLOBAL_TOOL_REGISTRY.execute(
                     "fetch_url_content", {"url": url, "max_chars": max_chars}
                 )
+
+            elif tool_name == "get_github_repo_metadata":
+                repo = tool_args.get("repo", "")
+                result = GLOBAL_TOOL_REGISTRY.execute("get_github_repo_metadata", {"repo": repo})
 
             elif tool_name in ("read_file", "list_files"):
                 result = GLOBAL_TOOL_REGISTRY.execute(tool_name, tool_args)

@@ -1316,6 +1316,7 @@ async def stream_agent_workflow(
             latest_obj_status = "SUCCESS"
             latest_final_summary = None
             total_exec_count = 0
+            latest_verification = None
 
             with workspace_service.workspace_context(
                 workspace_session.workspace_id if workspace_session else None
@@ -1335,6 +1336,8 @@ async def stream_agent_workflow(
                                     latest_obj_status = upd["objective_status"]
                                 if "final_summary" in upd and upd["final_summary"]:
                                     latest_final_summary = upd["final_summary"]
+                                if "verification" in upd and upd["verification"]:
+                                    latest_verification = upd["verification"]
                                 if "execution_records" in upd and isinstance(upd["execution_records"], list):
                                     total_exec_count = len(upd["execution_records"])
 
@@ -1379,6 +1382,7 @@ async def stream_agent_workflow(
                     "status": "DONE",
                     "objective_status": latest_obj_status,
                     "final_summary": latest_final_summary,
+                    "verification": latest_verification,
                 },
             )
         except Exception as exc:  # pragma: no cover

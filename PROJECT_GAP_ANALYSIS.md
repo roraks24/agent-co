@@ -491,7 +491,42 @@ To transform Agent Co into a winning submission for **Track 01 (AI-01: The AI Th
    - Vite production build passing with 0 errors.
    - End-to-end acceptance scenario test verified in `tests/test_acceptance_scenario.py`.
 
-### 16.2 Remaining Roadmap for Subsequent Phases
+### 16.2 Phase 1.1 Implementation Summary (Factual Evidence & Deterministic Verification)
+
+**Completed:** October 2026
+
+#### 1. Official Repository & Metadata Inspection (`get_github_repo_metadata`)
+- Added official GitHub REST API integration in `agent/tools_registry.py`.
+- Retrieves verified live metadata: exact stargazers count, forks, official SPDX license identifier, and latest release tags/published dates.
+- Records observation dates (e.g. `2026-10-23`) on all volatile metrics to prevent outdated claims.
+
+#### 2. Deterministic Factual Verification Engine (`agent/verification_engine.py`)
+- Independent multi-dimensional verification decoupling execution completion from factual veracity:
+  1. `execution_status`: verified execution of all planned action steps and bounded retry monitoring.
+  2. `deliverable_status`: confirms target deliverable creation, size, and required structural comparison sections.
+  3. `source_verification_status`: ensures all cited markdown source links (`[label](url)`) and plain URLs in the deliverable match actually retrieved and inspected evidence. Detects and flags fabricated or ungrounded external URLs.
+  4. `objective_status`: returns `SUCCESS` only if execution, deliverables, and evidence-grounded claims fully validate. Downgrades to `PARTIAL_SUCCESS` or `FAILED` with explicit `unverified_claims` if citations are fabricated or evidence is missing.
+
+#### 3. Research Accuracy & Grounded Synthesis (`agent/graph.py` & `agent/prompts.py`)
+- Updated research synthesis instructions: requires every quantitative claim (star counts, version tags, licenses) to be backed by retrieved evidence with markdown citations.
+- Prevents inventing contributor counts or unverified performance benchmarks.
+- Mandates honest categorization (e.g., distinguishing multi-agent frameworks from standalone APIs or single-prompt scripts).
+
+#### 4. Automated Regression Tests (`tests/test_factual_verification_regression.py`)
+- Added 10 targeted test cases covering:
+  1. Outdated version numbers unsupported by retrieved evidence.
+  2. Incorrect star counts conflicting with official collected source.
+  3. Claims without supporting evidence.
+  4. Fabricated URL detection.
+  5. Valid facts verified against official sources.
+  6. License claims verified against official SPDX metadata.
+  7. Source fetch failures and graceful degradation.
+  8. Unverified comparison details handled with diagnostic criteria.
+  9. Incomplete research assigned appropriate status (`FAILED`).
+  10. Preservation of existing coding workflow and execution audit trail.
+- Total test coverage: **73 backend tests passing (100%)**, **34 frontend tests passing (100%)**.
+
+### 16.3 Remaining Roadmap for Subsequent Phases
 - **Phase 2:** Optional multi-model selection (Groq, OpenAI, Anthropic).
 - **Phase 3:** Persistent workflow runs in SQLite for historical comparison.
 - **Phase 4:** Restricted subprocess Python sandbox for advanced mathematical and chart generation workflows.
