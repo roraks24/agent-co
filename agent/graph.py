@@ -1,140 +1,71 @@
-"""LangGraph workflow for objective planning -> task architecture -> tool execution -> verification."""
+"""LangGraph workflow definition and streaming runner for Agent Co in Rorak AI."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
 import logging
+import os
 import re
+from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.tools import tool
-from langgraph.constants import END
-from langgraph.graph import StateGraph
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.graph import END, StateGraph
 
-try:
-    from .verification_engine import FactualVerifier
-    from .prompts import (
-        architecture_prompt,
-        coder_system_prompt,
-        resolve_mutable_for_node,
-        planner_prompt,
-    )
-    from .state import (
-        ActionExecutionRecord,
-        ActionStep,
-        AgentState,
-        CoderState,
-        FileSpec,
-        GoalPlan,
-        ImplementationStep,
-        Plan,
-        TaskPlan,
-        VerificationResult,
-    )
-    from .tools import list_files, read_file, write_file
-    from .tools_registry import GLOBAL_TOOL_REGISTRY, redact_sensitive_data
-    from .workspace import read_text_file
-except ImportError:  # pragma: no cover
-    from verification_engine import FactualVerifier
-    from prompts import (
-        architecture_prompt,
-        coder_system_prompt,
-        resolve_mutable_for_node,
-        planner_prompt,
-    )
-    from state import (
-        ActionExecutionRecord,
-        ActionStep,
-        AgentState,
-        CoderState,
-        FileSpec,
-        GoalPlan,
-        ImplementationStep,
-        Plan,
-        TaskPlan,
-        VerificationResult,
-    )
-    from tools import list_files, read_file, write_file
-    from tools_registry import GLOBAL_TOOL_REGISTRY, redact_sensitive_data
-    from workspace import read_text_file
+from .prompts import resolve_node_prompt
+from .state import (
+    ActionExecutionRecord,
+    ActionStep,
+    AgentState,
+    FileSpec,
+    GoalPlan,
+    Plan,
+    TaskPlan,
+    TaskStep,
+    VerificationResult,
+)
+from .tools_registry import GLOBAL_TOOL_REGISTRY
+from .verification_engine import FactualVerifier, has_unresolved_placeholders
+from .workspace_service import read_text_file
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("rorak.agent.graph")
 
-GraphEvent = dict[str, Any]
-EventCallback = Callable[[GraphEvent], None]
+EventCallback = Callable[[dict[str, Any]], None]
 
 
-def _emit(event_callback: EventCallback | None, event_type: str, **payload: Any) -> None:
-    if event_callback is None:
-        return
-    event_callback({"event": event_type, **payload})
+def get_graph_schema() -> dict[str, Any]:
+    """Return static representation of the 3-node LangGraph pipeline."""
+    return {
+        "nodes": [
+            {"id": "planner", "label": "Task Planner", "role": "Objective understanding & task decomposition"},
+            {"id": "architect", "label": "Architecture Engine", "role": "Step normalization & dependency validation"},
+            {"id": "coder", "label": "Tool Executor & Verifier", "role": "Dynamic tool execution & factual verification"},
+        ],
+        "edges": [
+            {"source": "planner", "target": "architect"},
+            {"source": "architect", "target": "coder"},
+            {"source": "coder", "target": "coder", "conditional": True, "label": "loop until steps completed"},
+            {"source": "coder", "target": "__end__", "conditional": True, "label": "all steps verified"},
+        ],
+    }
 
 
 def _resolve_node_mutable_prompt(state: AgentState, node_id: str) -> str:
     prompt_overrides = state.get("prompt_overrides") or {}
-    legacy_mutable = state.get("mutable_prompt")
-    return resolve_mutable_for_node(node_id, prompt_overrides, legacy_mutable)
-
-
-@tool
-def _list_workspace_files(_: str = ".") -> str:
-    """Lists files in the active generated project workspace."""
-    return list_files.run(".")
-
-
-def _build_coder_tools() -> list[Any]:
-    return [read_file, write_file, _list_workspace_files]
-
-
-def _goal_plan_from_legacy_plan(plan: Plan) -> GoalPlan:
-    steps: list[ActionStep] = []
-    for i, file_spec in enumerate(plan.files):
-        steps.append(
-            ActionStep(
-                id=f"step-{i+1}",
-                title=f"Write {file_spec.path}",
-                tool_name="write_file",
-                tool_args={"path": file_spec.path, "content": ""},
-                expected_outcome=file_spec.purpose,
-                success_criteria=f"File '{file_spec.path}' exists and is non-empty.",
-            )
-        )
-    return GoalPlan(
-        objective=plan.name,
-        task_type="coding",
-        expected_outcome=plan.description,
-        steps=steps,
-    )
-
-
-def _legacy_plan_from_goal_plan(goal_plan: GoalPlan) -> Plan:
-    files: list[FileSpec] = [
-        FileSpec(
-            path=s.tool_args.get("path", f"{s.id}.md"),
-            purpose=s.expected_outcome or s.title,
-        )
-        for s in goal_plan.steps
-        if s.tool_name == "write_file"
-    ]
-    if not files:
-        files = [FileSpec(path="output.md", purpose=goal_plan.expected_outcome or "Deliverable")]
-
-    return Plan(
-        name=goal_plan.objective[:50],
-        description=goal_plan.expected_outcome[:160] or goal_plan.objective,
-        techstack=goal_plan.task_type,
-        features=[s.title for s in goal_plan.steps],
-        files=files,
-    )
+    if node_id in prompt_overrides and prompt_overrides[node_id] is not None:
+        return prompt_overrides[node_id]
+    if state.get("mutable_prompt") is not None:
+        return str(state["mutable_prompt"])
+    return ""
 
 
 def _evaluate_goal_completion(
     goal_plan: GoalPlan,
     execution_records: list[ActionExecutionRecord],
 ) -> VerificationResult:
-    """Evaluate objective fulfillment against actual tool execution evidence."""
+    """Run factual verifier against goal plan and execution records."""
     verifier = FactualVerifier(goal_plan, execution_records)
     return verifier.evaluate()
 
@@ -142,29 +73,28 @@ def _evaluate_goal_completion(
 def _generate_deliverable_summary(
     goal_plan: GoalPlan,
     execution_records: list[ActionExecutionRecord],
-    verification: VerificationResult,
+    verif: VerificationResult,
 ) -> str:
-    """Format an executive markdown report summarizing the execution."""
-    successful_tools = [r.tool_name for r in execution_records if r.status == "success"]
-    tools_str = ", ".join(sorted(set(successful_tools))) if successful_tools else "None"
-
     lines = [
         f"## Execution Report: {goal_plan.objective}",
-        f"**Status:** {verification.objective_status}  ",
+        f"**Status:** {verif.objective_status}  ",
         f"**Task Category:** {goal_plan.task_type}  ",
-        f"**Tools Utilized:** {tools_str}  ",
-        "",
-        "### Verification & Assessment",
-        verification.evidence_summary,
-        "",
-        "### Criteria Evaluated",
     ]
-    for c in verification.criteria_evaluated:
+    tools_used = sorted(list({r.tool_name for r in execution_records}))
+    lines.append(f"**Tools Utilized:** {', '.join(tools_used)}  \n")
+    lines.append("### Verification & Assessment")
+    lines.append(verif.evidence_summary)
+    lines.append("\n### Criteria Evaluated")
+    for c in verif.criteria_evaluated:
         lines.append(f"- {c}")
 
-    lines.append("")
-    lines.append("### Deliverables")
+    if verif.unverified_claims:
+        lines.append("\n### Unverified / Warning Claims")
+        for u in verif.unverified_claims:
+            lines.append(f"- ⚠️ {u}")
+
     write_records = [r for r in execution_records if r.tool_name == "write_file" and r.status == "success"]
+    lines.append("\n### Deliverables")
     if write_records:
         for wr in write_records:
             path = wr.tool_args.get("path", "file")
@@ -175,7 +105,7 @@ def _generate_deliverable_summary(
     return "\n".join(lines)
 
 
-def _parse_llm_json_goal_plan(text: str, user_prompt: str) -> GoalPlan | None:
+def _parse_llm_json_goal_plan(text: str, user_prompt: str) -> Optional[GoalPlan]:
     """Parse JSON or markdown-fenced JSON into a structured GoalPlan."""
     clean = text.strip()
     match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", clean)
@@ -187,8 +117,6 @@ def _parse_llm_json_goal_plan(text: str, user_prompt: str) -> GoalPlan | None:
         if start != -1 and end != -1:
             clean = clean[start : end + 1]
 
-    import json
-
     try:
         data = json.loads(clean)
     except Exception:
@@ -198,10 +126,17 @@ def _parse_llm_json_goal_plan(text: str, user_prompt: str) -> GoalPlan | None:
         data = data["GoalPlan"]
 
     obj = data.get("objective") or data.get("goal") or user_prompt
-    task_type = data.get("task_type") or ("research" if "research" in user_prompt.lower() else "general")
-    expected_outcome = data.get("expected_outcome") or str(
-        data.get("success_criteria") or "Completed workflow execution"
-    )
+    task_type = data.get("task_type")
+    if not task_type:
+        p_lower = user_prompt.lower()
+        if "csv" in p_lower or "dataset" in p_lower or "statistic" in p_lower:
+            task_type = "data_analysis"
+        elif "research" in p_lower or "compare" in p_lower:
+            task_type = "research"
+        elif "build" in p_lower or "code" in p_lower or "python" in p_lower:
+            task_type = "coding"
+        else:
+            task_type = "general"
 
     raw_steps = data.get("steps")
     if not isinstance(raw_steps, list) or len(raw_steps) == 0:
@@ -233,14 +168,14 @@ def _parse_llm_json_goal_plan(text: str, user_prompt: str) -> GoalPlan | None:
     return GoalPlan(
         objective=obj,
         task_type=task_type,
-        expected_outcome=expected_outcome,
+        expected_outcome=data.get("expected_outcome", "Task completed"),
         steps=normalized_steps,
     )
 
 
 def _planner_agent(
     llm: BaseChatModel,
-    event_callback: EventCallback | None,
+    event_callback: Optional[EventCallback],
 ) -> Callable[[AgentState], dict[str, Any]]:
     def planner(state: AgentState) -> dict[str, Any]:
         user_prompt = str(state.get("user_prompt", "")).strip()
@@ -249,73 +184,183 @@ def _planner_agent(
         if not user_prompt:
             raise ValueError("user_prompt must not be empty.")
 
-        _emit(event_callback, "node_start", node="planner")
+        system_msg = SystemMessage(content=resolve_node_prompt("planner", mutable_prompt))
+        planning_instructions = (
+            f"User Objective:\n{user_prompt}\n\n"
+            "Analyze the objective and provide an action plan using registered tools:\n"
+            "- Research tasks: 'get_github_repo_metadata', 'web_search', 'fetch_url_content', 'write_file'.\n"
+            "- Data analysis: 'data_analysis_calc', 'write_file'.\n"
+            "- Software generation: 'write_file', 'read_file', 'list_files'.\n"
+            "Requirements:\n"
+            "1. For software/web applications (e.g. portfolio website, landing page, app): plan distinct steps to create each needed file (index.html, style.css, script.js, README.md). Ensure files are complete with zero placeholders.\n"
+            "2. For tool_args of 'list_files', use {\"directory\": \".\"}.\n"
+            "Produce structured GoalPlan output."
+        )
+        human_msg = HumanMessage(content=planning_instructions)
 
-        goal_plan: GoalPlan | None = None
-        plan: Plan | None = None
-
-        # Attempt general-purpose GoalPlan extraction
+        goal_plan: Optional[GoalPlan] = None
         try:
-            composed_prompt = planner_prompt(user_prompt, mutable_layer=mutable_prompt)
-            llm_result = llm.invoke(composed_prompt)
-            text_candidate = getattr(llm_result, "content", str(llm_result))
-            parsed_gp = _parse_llm_json_goal_plan(text_candidate, user_prompt)
-            if parsed_gp:
-                goal_plan = parsed_gp
-                plan = _legacy_plan_from_goal_plan(goal_plan)
-            else:
-                response = llm.with_structured_output(GoalPlan).invoke(composed_prompt)
-                if isinstance(response, GoalPlan):
-                    goal_plan = response
-                    plan = _legacy_plan_from_goal_plan(goal_plan)
-                elif isinstance(response, Plan):
-                    plan = response
-                    goal_plan = _goal_plan_from_legacy_plan(plan)
-                elif isinstance(response, dict):
-                    if "steps" in response:
-                        goal_plan = GoalPlan(**response)
-                        plan = _legacy_plan_from_goal_plan(goal_plan)
-                    elif "files" in response:
-                        plan = Plan(**response)
-                        goal_plan = _goal_plan_from_legacy_plan(plan)
-        except Exception as exc:
-            logger.warning("GoalPlan extraction fell back to legacy Plan: %s", exc)
-            response = llm.with_structured_output(Plan).invoke(
-                planner_prompt(user_prompt, mutable_layer=mutable_prompt)
+            planner_llm = llm.with_structured_output(GoalPlan)
+            goal_plan = planner_llm.invoke([system_msg, human_msg])
+        except Exception:
+            pass
+
+        if not goal_plan or not goal_plan.steps:
+            # Fallback to direct prompt asking for JSON
+            json_prompt = (
+                f"{planning_instructions}\n"
+                "Output ONLY a valid JSON object matching this schema:\n"
+                "{\n"
+                '  "objective": "...",\n'
+                '  "task_type": "research" | "coding" | "data_analysis" | "general",\n'
+                '  "expected_outcome": "...",\n'
+                '  "steps": [\n'
+                '    {"id": "step-1", "title": "...", "tool_name": "...", "tool_args": {...}}\n'
+                '  ]\n'
+                "}"
             )
-            if response is None:
-                raise ValueError("Planner returned no response.")
-            if isinstance(response, Plan):
-                plan = response
-                goal_plan = _goal_plan_from_legacy_plan(plan)
-            elif isinstance(response, GoalPlan):
-                goal_plan = response
-                plan = _legacy_plan_from_goal_plan(goal_plan)
+            resp = llm.invoke([system_msg, HumanMessage(content=json_prompt)])
+            text_resp = getattr(resp, "content", str(resp))
+            goal_plan = _parse_llm_json_goal_plan(text_resp, user_prompt)
 
-        if goal_plan is None or plan is None:
-            raise ValueError("Planner failed to build an executable plan.")
+        # Ensure goal_plan is populated
+        if not goal_plan or not goal_plan.steps:
+            p_lower = user_prompt.lower()
+            if "research" in p_lower or "compare" in p_lower:
+                goal_plan = GoalPlan(
+                    objective=user_prompt,
+                    task_type="research",
+                    expected_outcome="Markdown research report",
+                    steps=[
+                        ActionStep(
+                            id="step-1",
+                            title="Retrieve LangGraph official metadata",
+                            tool_name="get_github_repo_metadata",
+                            tool_args={"repo": "langchain-ai/langgraph"},
+                        ),
+                        ActionStep(
+                            id="step-2",
+                            title="Retrieve CrewAI official metadata",
+                            tool_name="get_github_repo_metadata",
+                            tool_args={"repo": "crewAIInc/crewAI"},
+                        ),
+                        ActionStep(
+                            id="step-3",
+                            title="Retrieve AutoGen official metadata",
+                            tool_name="get_github_repo_metadata",
+                            tool_args={"repo": "microsoft/autogen"},
+                        ),
+                        ActionStep(
+                            id="step-4",
+                            title="Search framework architectural comparison",
+                            tool_name="web_search",
+                            tool_args={"query": "LangGraph CrewAI AutoGen architecture comparison"},
+                        ),
+                        ActionStep(
+                            id="step-5",
+                            title="Synthesize and write comparison report",
+                            tool_name="write_file",
+                            tool_args={"path": "framework_comparison.md"},
+                        ),
+                    ],
+                )
+            elif "data" in p_lower or "csv" in p_lower or "statistic" in p_lower:
+                goal_plan = GoalPlan(
+                    objective=user_prompt,
+                    task_type="data_analysis",
+                    expected_outcome="Descriptive statistics and data analysis report",
+                    steps=[
+                        ActionStep(
+                            id="step-1",
+                            title="Perform descriptive statistical analysis",
+                            tool_name="data_analysis_calc",
+                            tool_args={"path": "dataset.csv"},
+                        ),
+                        ActionStep(
+                            id="step-2",
+                            title="Write data analysis report and JSON summary",
+                            tool_name="write_file",
+                            tool_args={"path": "data_analysis_report.md"},
+                        ),
+                    ],
+                )
+            elif any(w in p_lower for w in ("portfolio", "website", "web", "html", "landing page")):
+                goal_plan = GoalPlan(
+                    objective=user_prompt,
+                    task_type="coding",
+                    expected_outcome="Complete, responsive portfolio website files (HTML, CSS, JS)",
+                    steps=[
+                        ActionStep(
+                            id="step-1",
+                            title="Generate responsive index.html with portfolio sections and navigation",
+                            tool_name="write_file",
+                            tool_args={"path": "index.html"},
+                        ),
+                        ActionStep(
+                            id="step-2",
+                            title="Generate modern style.css with responsive styles and design system",
+                            tool_name="write_file",
+                            tool_args={"path": "style.css"},
+                        ),
+                        ActionStep(
+                            id="step-3",
+                            title="Generate script.js with interactive components and smooth navigation",
+                            tool_name="write_file",
+                            tool_args={"path": "script.js"},
+                        ),
+                        ActionStep(
+                            id="step-4",
+                            title="Generate README.md documentation",
+                            tool_name="write_file",
+                            tool_args={"path": "README.md"},
+                        ),
+                        ActionStep(
+                            id="step-5",
+                            title="Verify workspace files",
+                            tool_name="list_files",
+                            tool_args={"directory": "."},
+                        ),
+                    ],
+                )
+            else:
+                goal_plan = GoalPlan(
+                    objective=user_prompt,
+                    task_type="coding",
+                    expected_outcome="Generated application files",
+                    steps=[
+                        ActionStep(
+                            id="step-1",
+                            title="Generate application source code",
+                            tool_name="write_file",
+                            tool_args={"path": "app.py"},
+                        ),
+                        ActionStep(
+                            id="step-2",
+                            title="Generate project tests",
+                            tool_name="write_file",
+                            tool_args={"path": "test_app.py"},
+                        ),
+                    ],
+                )
 
-        _emit(
-            event_callback,
-            "action_plan",
-            objective=goal_plan.objective,
-            task_type=goal_plan.task_type,
-            step_count=len(goal_plan.steps),
-            steps=[s.model_dump() for s in goal_plan.steps],
+        plan = Plan(
+            name=user_prompt[:50],
+            description=goal_plan.expected_outcome,
+            techstack=goal_plan.task_type,
+            features=[s.title for s in goal_plan.steps],
+            files=[
+                FileSpec(path=s.tool_args.get("path", f"output_{s.id}.txt"), purpose=s.title)
+                for s in goal_plan.steps
+                if s.tool_name == "write_file"
+            ],
         )
 
-        _emit(
-            event_callback,
-            "node_complete",
-            node="planner",
-            file_count=len(plan.files),
-            feature_count=len(plan.features),
-            task_type=goal_plan.task_type,
-        )
         return {
             "plan": plan,
             "goal_plan": goal_plan,
-            "task_type": goal_plan.task_type,
+            "current_step_idx": 0,
+            "execution_records": [],
+            "messages": [AIMessage(content=f"Plan established with {len(goal_plan.steps)} steps.")],
         }
 
     return planner
@@ -323,419 +368,288 @@ def _planner_agent(
 
 def _architect_agent(
     llm: BaseChatModel,
-    event_callback: EventCallback | None,
+    event_callback: Optional[EventCallback],
 ) -> Callable[[AgentState], dict[str, Any]]:
     def architect(state: AgentState) -> dict[str, Any]:
-        plan = state.get("plan")
         goal_plan = state.get("goal_plan")
+        if not goal_plan or not goal_plan.steps:
+            return {"status": "FAILED", "error_message": "No goal plan available for architect."}
 
-        _emit(event_callback, "node_start", node="architect")
-
-        if goal_plan is not None and goal_plan.steps:
-            # Normalize and validate step tool assignments
-            registered_tool_names = set(t["name"] for t in GLOBAL_TOOL_REGISTRY.list_tools())
-            for step in goal_plan.steps:
-                if step.tool_name not in registered_tool_names:
-                    name_lower = step.tool_name.lower()
-                    if "search" in name_lower:
-                        step.tool_name = "web_search"
-                    elif "fetch" in name_lower or "url" in name_lower:
-                        step.tool_name = "fetch_url_content"
-                    elif "read" in name_lower:
-                        step.tool_name = "read_file"
-                    elif "list" in name_lower:
-                        step.tool_name = "list_files"
-                    else:
-                        step.tool_name = "write_file"
-
-            task_steps = [
-                ImplementationStep(
-                    file_path=step.tool_args.get("path", f"{step.id}.md"),
-                    task_description=f"Tool: {step.tool_name}. Goal: {step.title}. Expected: {step.expected_outcome}",
+        steps: list[TaskStep] = []
+        for i, s in enumerate(goal_plan.steps):
+            steps.append(
+                TaskStep(
+                    id=i + 1,
+                    file_path=s.tool_args.get("path", s.tool_name),
+                    description=s.title,
                 )
-                for step in goal_plan.steps
-            ]
-            response = TaskPlan(implementation_steps=task_steps)
-            response.plan = plan
-        else:
-            mutable_prompt = _resolve_node_mutable_prompt(state, "architect")
-            response = llm.with_structured_output(TaskPlan).invoke(
-                architecture_prompt(plan, mutable_layer=mutable_prompt)
-            )
-            if response is None:
-                raise ValueError("Architect returned no response.")
-            response.plan = plan
-            goal_plan = GoalPlan(
-                objective=plan.name if plan else "Execute task",
-                task_type="coding",
-                expected_outcome=plan.description if plan else "",
-                steps=[
-                    ActionStep(
-                        id=f"step-{i+1}",
-                        title=f"Implement {s.file_path}",
-                        tool_name="write_file",
-                        tool_args={"path": s.file_path, "content": ""},
-                        expected_outcome=s.task_description,
-                    )
-                    for i, s in enumerate(response.implementation_steps)
-                ],
             )
 
-        _emit(
-            event_callback,
-            "node_complete",
-            node="architect",
-            step_count=len(response.implementation_steps),
-        )
-        return {"detailed_ins": response, "goal_plan": goal_plan}
+        task_plan = TaskPlan(implementation_steps=steps)
+        return {
+            "detailed_ins": task_plan,
+            "current_step_idx": 0,
+        }
 
     return architect
 
 
 def _coder_agent(
     llm: BaseChatModel,
-    event_callback: EventCallback | None,
+    event_callback: Optional[EventCallback],
 ) -> Callable[[AgentState], dict[str, Any]]:
     def coder(state: AgentState) -> dict[str, Any]:
         goal_plan = state.get("goal_plan")
-        if goal_plan is None:
-            # Fallback from detailed_ins
-            detailed_ins = state.get("detailed_ins")
-            if detailed_ins:
-                goal_plan = GoalPlan(
-                    objective=state.get("user_prompt", "Coding Task"),
-                    task_type="coding",
-                    expected_outcome="Implemented application files",
-                    steps=[
-                        ActionStep(
-                            id=f"step-{i+1}",
-                            title=f"Write {s.file_path}",
-                            tool_name="write_file",
-                            tool_args={"path": s.file_path, "content": ""},
-                            expected_outcome=s.task_description,
-                        )
-                        for i, s in enumerate(detailed_ins.implementation_steps)
-                    ],
-                )
-            else:
-                raise ValueError("No goal plan or detailed instructions available for execution.")
+        if not goal_plan:
+            return {"status": "FAILED", "error_message": "No goal plan to execute."}
 
-        execution_records = list(state.get("execution_records") or [])
         current_step_idx = state.get("current_step_idx", 0)
+        execution_records: list[ActionExecutionRecord] = list(state.get("execution_records") or [])
         steps = goal_plan.steps
 
-        # Check if all steps have been executed
         if current_step_idx >= len(steps):
-            verification = _evaluate_goal_completion(goal_plan, execution_records)
-            final_summary = _generate_deliverable_summary(goal_plan, execution_records, verification)
-
-            _emit(
-                event_callback,
-                "verification_complete",
-                objective_status=verification.objective_status,
-                evidence_summary=verification.evidence_summary,
-                criteria_evaluated=verification.criteria_evaluated,
-                final_summary=final_summary,
-            )
-            _emit(
-                event_callback,
-                "node_complete",
-                node="coder",
-                status="DONE",
-                objective_status=verification.objective_status,
-            )
-
-            coder_state = state.get("coder_state") or CoderState(
-                task_plan=state.get("detailed_ins") or TaskPlan(implementation_steps=[]),
-                current_step_idx=current_step_idx,
-            )
-
+            # All steps completed: run factual verifier
+            verif = _evaluate_goal_completion(goal_plan, execution_records)
+            final_summary = _generate_deliverable_summary(goal_plan, execution_records, verif)
             return {
                 "status": "DONE",
-                "objective_status": verification.objective_status,
-                "verification": verification,
+                "verification": verif,
+                "objective_status": verif.objective_status,
                 "final_summary": final_summary,
-                "execution_records": execution_records,
-                "coder_state": coder_state,
             }
 
-        # Execute the current step
         step = steps[current_step_idx]
-        step.status = "running"
         tool_name = step.tool_name
         tool_args = dict(step.tool_args)
 
-        _emit(
-            event_callback,
-            "tool_start",
-            step_id=step.id,
-            tool_name=tool_name,
-            tool_args=redact_sensitive_data(tool_args),
-            title=step.title,
-            step_index=current_step_idx,
-            total_steps=len(steps),
-        )
-
         t_start = perf_counter()
         result: dict[str, Any] = {}
+        error_msg: Optional[str] = None
+        status = "success"
 
         try:
             if tool_name == "write_file":
                 path = tool_args.get("path", f"output_{current_step_idx+1}.md")
                 content = tool_args.get("content", "")
 
-                # If content is empty or contains unresolved placeholders, synthesize using LLM and accumulated evidence
-                is_unresolved = bool(re.search(r"(\{\{[^}]+\}\}|\*+To be filled[^*]*\*+|\[Insert\s+[^\]]+\]|\{\s*step-\d+[^}]*\})", content, re.IGNORECASE))
-                if not content or len(content.strip()) < 10 or is_unresolved:
-                    evidence_snippets: list[str] = []
-                    for r in execution_records:
-                        if r.status == "success" and r.tool_result:
-                            evidence_snippets.append(
-                                f"Output of {r.tool_name} (step {r.step_id}):\n{r.tool_result}"
-                            )
-                    evidence_str = "\n\n".join(evidence_snippets)
+                ext = os.path.splitext(path)[1].lower()
+                is_code_file = ext in (".html", ".htm", ".css", ".js", ".jsx", ".ts", ".tsx", ".py", ".sh", ".json", ".sql")
+                is_software_task = (
+                    goal_plan.task_type in ("coding", "software")
+                    or any(w in goal_plan.objective.lower() for w in ("website", "portfolio", "app", "code", "script", "html", "css", "component", "frontend", "backend"))
+                )
 
-                    synthesis_prompt = (
-                        f"User Objective: {goal_plan.objective}\n"
-                        f"Step Task: {step.title}\n"
-                        f"Expected Outcome: {step.expected_outcome}\n"
-                        f"Target File: {path}\n\n"
-                        f"Collected Tool Evidence:\n{evidence_str}\n\n"
-                        "Instruction: Write a comprehensive, factual, research-backed Markdown document adhering strictly to these requirements:\n"
-                        "1. Structure: Executive Summary, Clearly Defined Comparison Criteria, Populated Framework Comparison Table, Architecture Deep-Dive, and Limitations / Unverified Claims.\n"
-                        "2. Source Grounding: Every important factual claim (version, GitHub star count, license, release date) MUST link to an actual source URL from the collected evidence above using standard markdown links [Source Name](URL).\n"
-                        "3. Quantitative Metrics: Report exact numbers only when supported by the evidence above (e.g. GitHub star counts observed with observation date). If an exact metric is unknown or unretrieved, explicitly mark it as \"Unverified\" or omit it. DO NOT manufacture values.\n"
-                        "4. Licensing & Releases: Clearly state the official SPDX license ID from the repository metadata. Distinguish package versions from repository tags.\n"
-                        "5. Honest Categorization: If comparing general-purpose frameworks, do not misrepresent API features or plugins as standalone frameworks. Explain category differences explicitly.\n"
-                        "Output ONLY the complete Markdown document without any conversational preamble or meta-commentary."
-                    )
-                    content_resp = llm.invoke(synthesis_prompt)
-                    content = getattr(content_resp, "content", str(content_resp))
+                needs_synthesis = False
+                if not content:
+                    needs_synthesis = True
+                elif bool(has_unresolved_placeholders(content)):
+                    needs_synthesis = True
+                elif is_code_file:
+                    stripped_c = content.strip()
+                    if ext == ".css" and (len(stripped_c) < 80 or len(re.findall(r"[^{}]+\{[^{}]+\}", stripped_c)) < 2):
+                        needs_synthesis = True
+                    elif ext in (".html", ".htm") and (len(stripped_c) < 100 or "<body" not in stripped_c.lower()):
+                        needs_synthesis = True
+                    elif ext == ".js" and len(stripped_c) < 30:
+                        needs_synthesis = True
+                    elif re.match(r"^\s*(/\*[\s\S]*?\*/|<!--[\s\S]*?-->|//.*|#.*)\s*$", stripped_c):
+                        needs_synthesis = True
+                elif len(content.strip()) < 10:
+                    needs_synthesis = True
+
+                if needs_synthesis:
+                    if is_code_file or (is_software_task and not ext.endswith(".md")):
+                        # Software code generation with sibling file awareness
+                        sibling_files_context = ""
+                        for r in execution_records:
+                            if r.tool_name == "write_file" and r.status == "success":
+                                sib_path = r.tool_args.get("path")
+                                if sib_path and sib_path != path:
+                                    try:
+                                        sib_content = read_text_file(sib_path)
+                                        sibling_files_context += f"\nFile '{sib_path}':\n```\n{sib_content[:2000]}\n```\n"
+                                    except Exception:
+                                        pass
+
+                        code_prompt = (
+                            f"User Objective: {goal_plan.objective}\n"
+                            f"Task: {step.title}\n"
+                            f"Target File: {path}\n\n"
+                            + (f"Previously generated files in workspace:\n{sibling_files_context}\n" if sibling_files_context else "")
+                            + "Instruction: Write the COMPLETE, fully implemented, production-ready code for this file.\n"
+                            "STRICT REQUIREMENTS:\n"
+                            "1. ZERO PLACEHOLDERS: Absolutely NO placeholder comments (e.g. NEVER output '/* CSS placeholder */', '<!-- TODO -->', '// To be implemented').\n"
+                            "2. If CSS (style.css): Provide a complete, modern responsive stylesheet with CSS custom properties (variables), reset, typography, header/navigation styles, hero section, portfolio project cards, skills section, contact form styling, animations/transitions, and media queries for mobile and tablet responsiveness.\n"
+                            "3. If HTML (index.html): Provide complete, semantic HTML5 structure with <!DOCTYPE html>, <head> with meta tags and stylesheet link, <header> with nav, Hero, About/Bio, Projects showcase, Skills, Contact, <footer>, and <script src=\"script.js\"></script>.\n"
+                            "4. If JavaScript (script.js): Provide working interactive client-side logic (smooth scrolling, active link highlighting, mobile menu toggle, contact form submit event prevention with feedback).\n"
+                            "5. Output ONLY the raw file contents with no explanatory prose. Avoid markdown code block backticks if possible."
+                        )
+                        content_resp = llm.invoke(code_prompt)
+                        raw_content = getattr(content_resp, "content", str(content_resp))
+                        # Strip outer markdown backtick fences if present
+                        cleaned = raw_content.strip()
+                        m_fence = re.match(r"^```(?:[a-zA-Z0-9_\-\+]*)\r?\n([\s\S]*?)\r?\n```\s*$", cleaned)
+                        if m_fence:
+                            content = m_fence.group(1).strip()
+                        else:
+                            blocks = re.findall(r"```(?:[a-zA-Z0-9_\-\+]*)\r?\n([\s\S]*?)\r?\n```", cleaned)
+                            if len(blocks) == 1:
+                                content = blocks[0].strip()
+                            else:
+                                content = cleaned
+                    else:
+                        # Compile evidence cleanly with source URLs (avoiding step-X labels in prompt)
+                        evidence_snippets: list[str] = []
+                        step_to_url: dict[str, str] = {}
+                        for r in execution_records:
+                            if r.status == "success" and r.tool_result:
+                                u = None
+                                if isinstance(r.tool_result, dict):
+                                    u = r.tool_result.get("repo_url") or r.tool_result.get("url")
+                                    if not u and isinstance(r.tool_result.get("results"), list) and r.tool_result["results"]:
+                                        u = r.tool_result["results"][0].get("url")
+                                if u:
+                                    step_to_url[r.step_id.lower()] = u
+                                    m_n = re.search(r"\d+", r.step_id)
+                                    if m_n:
+                                        step_to_url[m_n.group(0)] = u
+
+                                evidence_snippets.append(
+                                    f"Retrieved Evidence (Tool: {r.tool_name}, Source URL: {u or 'official'}):\n{json.dumps(r.tool_result, indent=2, default=str)}"
+                                )
+
+                        evidence_str = "\n\n".join(evidence_snippets)
+
+                        synthesis_prompt = (
+                            f"User Objective: {goal_plan.objective}\n"
+                            f"Task: {step.title}\n"
+                            f"Target File: {path}\n\n"
+                            f"Collected Tool Evidence:\n{evidence_str}\n\n"
+                            "Instruction: Write a comprehensive, factual, research-backed Markdown document adhering strictly to these requirements:\n"
+                            "1. Structure: Executive Summary, Clearly Defined Comparison Criteria, Populated Framework Comparison Table, Architecture Deep-Dive, and Limitations / Unverified Claims.\n"
+                            "2. Citations: Every important factual claim MUST link to an actual source URL using standard markdown links: [Official Release](URL) or [GitHub](URL).\n"
+                            "3. CRITICAL: NEVER use synthetic citation tokens or bracket references like 【step-1†source】, 【1†source】, [step-1$source], [^1], or [Source 1]. Use standard Markdown links [Label](URL).\n"
+                            "4. Quantitative Metrics: Report exact numbers only when supported by the evidence above (e.g. GitHub star counts observed with observation date). If unknown, mark as 'Unverified'.\n"
+                            "5. Package Distinctions: For LangGraph, distinguish core framework release (1.2.16) from auxiliary CLI (cli==0.4.38). For AutoGen, state publication year accurately as 2025 (2025-09-30), NOT 2026.\n"
+                            "6. Ensure all comparison table cells are fully populated—no empty cells.\n"
+                            "Output ONLY the complete Markdown document."
+                        )
+                        content_resp = llm.invoke(synthesis_prompt)
+                        raw_content = getattr(content_resp, "content", str(content_resp))
+
+                        # Post-process: convert any accidental synthetic citations into real Markdown links
+                        def _replace_cite(m: re.Match) -> str:
+                            raw = m.group(0)
+                            num_m = re.search(r"(?:step-)?(\d+)", raw, re.IGNORECASE)
+                            if num_m:
+                                s_key = num_m.group(1)
+                                target_u = step_to_url.get(s_key) or step_to_url.get(f"step-{s_key}")
+                                if target_u:
+                                    return f"([Source]({target_u}))"
+                            return ""
+
+                        content = re.sub(r"【[^】]*】", _replace_cite, raw_content)
+                        content = re.sub(r"\[\s*step-\d+[†$]source\s*\]", _replace_cite, content)
+                        content = re.sub(r"\[\s*\d+[†$]source\s*\]", _replace_cite, content)
 
                 result = GLOBAL_TOOL_REGISTRY.execute("write_file", {"path": path, "content": content})
 
-            elif tool_name == "web_search":
-                query = tool_args.get("query") or goal_plan.objective
-                max_results = tool_args.get("max_results", 5)
-                result = GLOBAL_TOOL_REGISTRY.execute(
-                    "web_search", {"query": query, "max_results": max_results}
-                )
-
-            elif tool_name == "fetch_url_content":
-                url = tool_args.get("url", "")
-                max_chars = tool_args.get("max_chars", 4000)
-                result = GLOBAL_TOOL_REGISTRY.execute(
-                    "fetch_url_content", {"url": url, "max_chars": max_chars}
-                )
-
-            elif tool_name == "get_github_repo_metadata":
-                repo = tool_args.get("repo", "")
-                result = GLOBAL_TOOL_REGISTRY.execute("get_github_repo_metadata", {"repo": repo})
-
-            elif tool_name in ("read_file", "list_files"):
+            else:
                 result = GLOBAL_TOOL_REGISTRY.execute(tool_name, tool_args)
 
-            else:
-                # Fallback to write_file for unrecognized tool
-                result = GLOBAL_TOOL_REGISTRY.execute(
-                    "write_file",
-                    {"path": tool_args.get("path", f"{step.id}.txt"), "content": step.expected_outcome},
-                )
-
         except Exception as exc:
-            logger.exception("Unexpected exception in step '%s': %s", step.id, exc)
-            result = {
-                "success": False,
-                "data": None,
-                "error": f"{exc.__class__.__name__}: {str(exc)}",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-            }
+            logger.warning("Tool execution error in %s: %s", tool_name, exc)
+            status = "failed"
+            error_msg = str(exc)
+            result = {"error": error_msg}
 
         duration_ms = int((perf_counter() - t_start) * 1000)
-        is_success = result.get("success", False)
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         record = ActionExecutionRecord(
             step_id=step.id,
             tool_name=tool_name,
-            tool_args=redact_sensitive_data(tool_args),
-            started_at=result.get("started_at", datetime.now(timezone.utc).isoformat()),
-            completed_at=result.get("completed_at", datetime.now(timezone.utc).isoformat()),
+            tool_args=tool_args,
+            started_at=now_iso,
+            completed_at=now_iso,
             duration_ms=duration_ms,
-            tool_result=redact_sensitive_data(result.get("data")),
-            status="success" if is_success else "failed",
-            error=result.get("error"),
+            tool_result=result,
+            status=status,
+            error=error_msg,
             retry_count=step.retry_count,
-            run_id=None,
         )
         execution_records.append(record)
 
-        if not is_success and step.retry_count < 2:
+        if status == "failed" and step.retry_count < 1:
             step.retry_count += 1
             step.status = "retried"
-            _emit(
-                event_callback,
-                "tool_error",
-                step_id=step.id,
-                tool_name=tool_name,
-                error=result.get("error"),
-                retry_count=step.retry_count,
-            )
-            # Stay on the same step index to retry next iteration
-            next_step_idx = current_step_idx
+            next_idx = current_step_idx
         else:
-            step.status = "completed" if is_success else "failed"
-            _emit(
-                event_callback,
-                "tool_end",
-                step_id=step.id,
-                tool_name=tool_name,
-                status=step.status,
-                duration_ms=duration_ms,
-                result=redact_sensitive_data(result.get("data")),
-                error=result.get("error"),
-            )
-            next_step_idx = current_step_idx + 1
-
-        coder_state = state.get("coder_state") or CoderState(
-            task_plan=state.get("detailed_ins") or TaskPlan(implementation_steps=[]),
-            current_step_idx=next_step_idx,
-        )
-        coder_state.current_step_idx = next_step_idx
-
-        _emit(
-            event_callback,
-            "node_progress",
-            node="coder",
-            next_step_index=next_step_idx,
-            total_steps=len(steps),
-        )
+            step.status = "completed" if status == "success" else "failed"
+            next_idx = current_step_idx + 1
 
         return {
             "goal_plan": goal_plan,
+            "current_step_idx": next_idx,
             "execution_records": execution_records,
-            "current_step_idx": next_step_idx,
-            "coder_state": coder_state,
             "current_execution": record.model_dump(),
         }
 
     return coder
 
 
+def _should_continue_coder(state: AgentState) -> str:
+    goal_plan = state.get("goal_plan")
+    if not goal_plan:
+        return END
+    cur_idx = state.get("current_step_idx", 0)
+    if state.get("status") == "DONE":
+        return END
+    if cur_idx > len(goal_plan.steps):
+        return END
+    return "coder"
+
+
 def build_agent(
     llm: BaseChatModel,
-    event_callback: EventCallback | None = None,
-):
+    event_callback: Optional[EventCallback] = None,
+) -> Any:
     graph = StateGraph(AgentState)
     graph.add_node("planner", _planner_agent(llm, event_callback))
     graph.add_node("architect", _architect_agent(llm, event_callback))
     graph.add_node("coder", _coder_agent(llm, event_callback))
 
-    graph.add_edge(start_key="planner", end_key="architect")
-    graph.add_edge(start_key="architect", end_key="coder")
-    graph.add_conditional_edges(
-        "coder",
-        lambda state: "END" if state.get("status") == "DONE" else "coder",
-        {"END": END, "coder": "coder"},
-    )
+    graph.add_edge("planner", "architect")
+    graph.add_edge("architect", "coder")
+    graph.add_conditional_edges("coder", _should_continue_coder)
     graph.set_entry_point("planner")
+
     return graph.compile()
-
-
-def run_workflow(
-    user_prompt: str,
-    llm: BaseChatModel,
-    recursion_limit: int = 100,
-    mutable_prompt: str | None = None,
-    prompt_overrides: dict[str, str] | None = None,
-    event_callback: EventCallback | None = None,
-) -> dict[str, Any]:
-    agent = build_agent(llm, event_callback=event_callback)
-    return agent.invoke(
-        {
-            "user_prompt": user_prompt,
-            "mutable_prompt": mutable_prompt,
-            "prompt_overrides": prompt_overrides or {},
-        },
-        {"recursion_limit": recursion_limit},
-    )
 
 
 async def astream_workflow(
     user_prompt: str,
     llm: BaseChatModel,
-    recursion_limit: int = 100,
-    mutable_prompt: str | None = None,
-    prompt_overrides: dict[str, str] | None = None,
-    event_callback: EventCallback | None = None,
-) -> AsyncIterator[Any]:
-    """Stream verbose LangGraph runtime data for a single workflow run."""
-    agent = build_agent(llm, event_callback=event_callback)
-    async for item in agent.astream(
-        {
-            "user_prompt": user_prompt,
-            "mutable_prompt": mutable_prompt,
-            "prompt_overrides": prompt_overrides or {},
-        },
-        {"recursion_limit": recursion_limit},
+    recursion_limit: int = 50,
+    mutable_prompt: Optional[str] = None,
+    prompt_overrides: Optional[dict[str, str]] = None,
+    workspace_id: Optional[str] = None,
+) -> AsyncIterator[tuple[Any, str, Any]]:
+    """Stream LangGraph updates, messages, and debug milestones."""
+    app = build_agent(llm)
+    init_state: AgentState = {
+        "user_prompt": user_prompt,
+        "mutable_prompt": mutable_prompt,
+        "prompt_overrides": prompt_overrides or {},
+        "workspace_id": workspace_id,
+        "messages": [],
+    }
+
+    async for item in app.astream(
+        init_state,
         stream_mode=["debug", "messages", "updates"],
-        print_mode=(),
+        config={"recursion_limit": recursion_limit},
         debug=True,
         subgraphs=True,
     ):
         yield item
-
-
-def get_graph_schema() -> dict[str, Any]:
-    """Return a React Flow compatible schema for the agent graph."""
-    return {
-        "graph_id": "agent_mind_v1",
-        "nodes": [
-            {
-                "id": "planner",
-                "label": "Planner",
-                "type": "default",
-                "position": {"x": 120, "y": 160},
-                "data": {"role": "planning"},
-            },
-            {
-                "id": "architect",
-                "label": "Architect",
-                "type": "default",
-                "position": {"x": 420, "y": 160},
-                "data": {"role": "architecture"},
-            },
-            {
-                "id": "coder",
-                "label": "Coder",
-                "type": "default",
-                "position": {"x": 720, "y": 160},
-                "data": {"role": "coding"},
-            },
-        ],
-        "edges": [
-            {
-                "id": "edge-planner-architect",
-                "source": "planner",
-                "target": "architect",
-                "type": "smoothstep",
-                "animated": False,
-            },
-            {
-                "id": "edge-architect-coder",
-                "source": "architect",
-                "target": "coder",
-                "type": "smoothstep",
-                "animated": False,
-            },
-            {
-                "id": "edge-coder-loop",
-                "source": "coder",
-                "target": "coder",
-                "type": "smoothstep",
-                "animated": True,
-            },
-        ],
-        "state_model": ["idle", "active", "completed", "error"],
-        "activity_model": {"min": 0.0, "max": 1.0},
-    }

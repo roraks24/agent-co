@@ -45,7 +45,7 @@ def normalize_url(url: str) -> str:
 
 
 def has_unresolved_placeholders(text: str) -> list[str]:
-    """Detect unresolved template placeholders or unfilled markers in deliverable text."""
+    """Detect unresolved template placeholders, unfilled markers, or stub comments in deliverable text."""
     if not text:
         return []
     findings = []
@@ -65,7 +65,98 @@ def has_unresolved_placeholders(text: str) -> list[str]:
     step_tags = re.findall(r"\{\s*step-\d+[^}]*\}", text, re.IGNORECASE)
     if step_tags:
         findings.extend(step_tags[:5])
+    # 5. Synthetic citation brackets: 【step-1†source】, 【1†source】, 【...†source】
+    synthetic_cites = re.findall(r"【[^】]*】", text)
+    if synthetic_cites:
+        findings.extend(synthetic_cites[:5])
+    # 6. Step references in brackets: [step-1$source], [step-1†source], [step-1]
+    step_refs = re.findall(r"\[\s*step-\d+[^\]]*\]", text, re.IGNORECASE)
+    if step_refs:
+        findings.extend(step_refs[:5])
+    # 7. Numbered synthetic source tags: [1†source], [1$source]
+    num_synthetic = re.findall(r"\[\^?\d+[†$]source\]", text, re.IGNORECASE)
+    if num_synthetic:
+        findings.extend(num_synthetic[:5])
+    # 8. Code comment placeholders (CSS, JS, HTML, Python, etc.)
+    comment_placeholders = re.findall(
+        r"(/\*[\s\S]*?(?:placeholder|todo|to-do|to\s+be\s+implemented|add\s+styles?|add\s+content|coming\s+soon)[\s\S]*?\*/|"
+        r"<!--[\s\S]*?(?:placeholder|todo|to-do|to\s+be\s+implemented|add\s+styles?|add\s+content|coming\s+soon)[\s\S]*?-->|"
+        r"//\s*(?:placeholder|todo|to-do|to\s+be\s+implemented|add\s+styles?|add\s+content).*|"
+        r"#\s*(?:placeholder|todo|to-do|to\s+be\s+implemented|add\s+styles?|add\s+content).*)",
+        text,
+        re.IGNORECASE,
+    )
+    if comment_placeholders:
+        findings.extend([c.strip() for c in comment_placeholders[:5]])
+
+    # 9. Entire file is just a short comment or contains bare placeholder indicator
+    stripped = text.strip()
+    if re.search(r"^\s*(/\*[\s\S]*?\*/|<!--[\s\S]*?-->|//.*|#.*)\s*$", stripped):
+        if any(w in stripped.lower() for w in ("placeholder", "todo", "css", "html", "style", "script", "code")):
+            findings.append(stripped[:80])
+
     return findings
+
+
+def validate_software_deliverable(file_path: str, content: str, all_files: dict[str, str]) -> list[str]:
+    """Validate that code deliverables (HTML, CSS, JS, Python) are complete, syntactic, and properly cross-linked."""
+    issues: list[str] = []
+    lower_path = file_path.lower()
+    stripped = content.strip()
+
+    # General placeholder detection
+    placeholders = has_unresolved_placeholders(content)
+    if placeholders:
+        issues.append(f"Contains placeholder or stub content: '{placeholders[0]}'")
+
+    # CSS validation
+    if lower_path.endswith(".css"):
+        rules = re.findall(r"[^{}]+\{[^{}]+\}", content)
+        if len(rules) < 2 or len(stripped) < 80:
+            issues.append(f"CSS file '{file_path}' has insufficient styling rules ({len(rules)} rule(s) found). Must provide a complete stylesheet.")
+        if "/*" in content and "*/" in content and len(rules) == 0:
+            issues.append(f"CSS file '{file_path}' contains only comments without active CSS rules.")
+
+    # HTML validation
+    elif lower_path.endswith((".html", ".htm")):
+        if "<!doctype html" not in lower_path and "<html" not in content.lower():
+            issues.append(f"HTML file '{file_path}' is missing basic HTML5 document structure.")
+        if "<body" not in content.lower():
+            issues.append(f"HTML file '{file_path}' is missing <body> section.")
+
+        # Cross-reference check: verify stylesheets linked in HTML actually exist
+        css_links = re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', content, re.IGNORECASE)
+        css_links += re.findall(r'<link[^>]+href=["\']([^"\']+\.css)["\']', content, re.IGNORECASE)
+        for link_target in css_links:
+            clean_target = link_target.split("?")[0].lstrip("./")
+            if not clean_target.startswith(("http://", "https://", "//")):
+                found = any(k.endswith(clean_target) for k in all_files.keys())
+                if not found:
+                    issues.append(f"HTML references stylesheet '{link_target}' which was not found in workspace.")
+
+        # Cross-reference check: verify scripts linked in HTML actually exist
+        js_links = re.findall(r'<script[^>]+src=["\']([^"\']+\.js)["\']', content, re.IGNORECASE)
+        for link_target in js_links:
+            clean_target = link_target.split("?")[0].lstrip("./")
+            if not clean_target.startswith(("http://", "https://", "//")):
+                found = any(k.endswith(clean_target) for k in all_files.keys())
+                if not found:
+                    issues.append(f"HTML references script '{link_target}' which was not found in workspace.")
+
+    # JS validation
+    elif lower_path.endswith(".js"):
+        if len(stripped) < 30:
+            issues.append(f"JavaScript file '{file_path}' is too brief (<30 chars).")
+
+    # Python validation
+    elif lower_path.endswith(".py"):
+        try:
+            import ast
+            ast.parse(content)
+        except SyntaxError as e:
+            issues.append(f"Python file '{file_path}' syntax error: {e}")
+
+    return issues
 
 
 class FactualVerifier:
@@ -148,19 +239,32 @@ class FactualVerifier:
         verified_sources_set: set[str] = set()
 
         total_steps = len(self.goal_plan.steps)
-        successful_records = [r for r in self.execution_records if r.status == "success"]
-        failed_records = [r for r in self.execution_records if r.status in ("failed", "error")]
+        # An action is completed if its final status in goal_plan is "completed" or has a success execution record
+        completed_step_ids = {
+            (getattr(s, "id", None) or getattr(s, "step_id", None))
+            for s in self.goal_plan.steps
+            if s.status == "completed"
+        }
+        for r in self.execution_records:
+            if r.status == "success":
+                completed_step_ids.add(r.step_id)
+
+        failed_step_ids = {
+            (getattr(s, "id", None) or getattr(s, "step_id", None))
+            for s in self.goal_plan.steps
+            if s.status == "failed" and (getattr(s, "id", None) or getattr(s, "step_id", None)) not in completed_step_ids
+        }
 
         # 1. Execution status
-        if len(failed_records) == 0 and len(successful_records) >= total_steps:
+        if total_steps > 0 and len(completed_step_ids) >= total_steps and len(failed_step_ids) == 0:
             execution_status = "SUCCESS"
             criteria_evaluated.append(f"Execution complete: All {total_steps} planned actions succeeded.")
-        elif len(successful_records) > 0:
+        elif len(completed_step_ids) > 0:
             execution_status = "PARTIAL_SUCCESS"
-            criteria_evaluated.append(f"Execution partial: {len(successful_records)}/{total_steps} actions completed.")
+            criteria_evaluated.append(f"Execution partial: {len(completed_step_ids)}/{total_steps} actions completed.")
         else:
             execution_status = "FAILED"
-            criteria_evaluated.append(f"Execution failed: {len(failed_records)} actions failed.")
+            criteria_evaluated.append(f"Execution failed: {len(failed_step_ids)}/{total_steps} actions failed.")
 
         # 2. Deliverable validation
         deliverable_status = "SUCCESS"
@@ -175,28 +279,26 @@ class FactualVerifier:
             try:
                 content = read_text_file(target_path)
                 file_contents[target_path] = content
-
-                # Reject any deliverable containing unresolved template placeholders
-                placeholder_findings = has_unresolved_placeholders(content)
-                if placeholder_findings:
-                    deliverable_status = "FAILED"
-                    source_verification_status = "FAILED"
-                    for pf in placeholder_findings:
-                        unverified_claims.append(f"Unresolved template placeholder: '{pf}'")
-                    criteria_evaluated.append(
-                        f"Deliverable rejected: '{target_path}' contains {len(placeholder_findings)} unresolved template placeholders."
-                    )
-
-                if len(content.strip()) < 10:
-                    deliverable_status = "FAILED"
-                    criteria_evaluated.append(f"Deliverable warning: '{target_path}' is too brief (<10 chars).")
-                elif not placeholder_findings:
-                    criteria_evaluated.append(
-                        f"Deliverable verified: '{target_path}' exists ({len(content)} chars)."
-                    )
             except Exception as exc:
                 deliverable_status = "FAILED"
                 criteria_evaluated.append(f"Deliverable missing: '{target_path}' could not be read ({exc}).")
+
+        # Validate each deliverable for software quality, completeness, and placeholders
+        for target_path, content in file_contents.items():
+            software_issues = validate_software_deliverable(target_path, content, file_contents)
+            if software_issues:
+                deliverable_status = "FAILED"
+                for iss in software_issues:
+                    unverified_claims.append(f"Deliverable '{target_path}': {iss}")
+                    criteria_evaluated.append(f"Deliverable defect in '{target_path}': {iss}")
+
+            if len(content.strip()) < 10:
+                deliverable_status = "FAILED"
+                criteria_evaluated.append(f"Deliverable warning: '{target_path}' is too brief (<10 chars).")
+            elif not software_issues:
+                criteria_evaluated.append(
+                    f"Deliverable verified: '{target_path}' exists and is complete ({len(content)} chars)."
+                )
 
         # 3. Factual & Source Verification (for research deliverables)
         source_verification_status = "SUCCESS"

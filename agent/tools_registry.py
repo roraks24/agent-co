@@ -480,10 +480,11 @@ def execute_read_file(path: str) -> dict[str, Any]:
         }
 
 
-def execute_list_files(directory: str = ".") -> dict[str, Any]:
+def execute_list_files(directory: Optional[str] = None, path: Optional[str] = None, **kwargs: Any) -> dict[str, Any]:
     """List relative files inside the active session workspace."""
     try:
-        files = list_relative_files(directory)
+        target_dir = path or directory or kwargs.get("dir") or "."
+        files = list_relative_files(target_dir)
         return {
             "directory": directory,
             "count": len(files),
