@@ -1,0 +1,33 @@
+{
+  "name": "agent-co-frontend",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "axios": "^1.13.5",
+    "lucide-react": "0.487.0",
+    "motion": "12.23.24",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router": "7.13.0",
+    "zustand": "5.0.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.1.12",
+    "@vitejs/plugin-react": "4.7.0",
+    "jsdom": "26.1.0",
+    "tailwindcss": "4.1.12",
+    "vite": "6.3.5",
+    "vitest": "2.1.9"
+  },
+  "pnpm": {
+    "overrides": {
+      "vite": "6.3.5"
+    }
+  }
+}

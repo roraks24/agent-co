@@ -1,0 +1,14 @@
+groq
+langchain
+langchain-core
+langchain-groq
+langgraph
+fastapi
+uvicorn
+pip
+pydantic
+python-dotenv
+langsmith
+ddgs
+beautifulsoup4
+httpx
