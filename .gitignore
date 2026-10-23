@@ -190,3 +190,18 @@ frontend/.npm-cache/
 frontend/.npm-cache2/
 tests/.tmp/
 tmp*/
+
+# SQLite database files and workspaces
+*.db
+*.db-journal
+workspaces/
+
+# Keys and credentials
+*.pem
+*.key
+*.cert
+
+# Backups
+frontend/react-studio-backup/
+
+

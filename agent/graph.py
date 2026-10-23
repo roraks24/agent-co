@@ -29,6 +29,7 @@ from .state import (
 from .tools_registry import GLOBAL_TOOL_REGISTRY
 from .verification_engine import FactualVerifier, has_unresolved_placeholders
 from .workspace_service import read_text_file
+from .source_serializer import clean_transport_escapes, validate_source_code
 
 logger = logging.getLogger("rorak.agent.graph")
 
@@ -189,11 +190,11 @@ def _planner_agent(
         planning_instructions = (
             f"User Objective:\n{user_prompt}\n\n"
             "Analyze the objective and provide an action plan using registered tools:\n"
-            "- Research tasks: 'get_github_repo_metadata', 'web_search', 'fetch_url_content', 'write_file'.\n"
+            "- Research tasks: 'get_github_repo_metadata', 'web_search', 'wikipedia_summary', 'fetch_url_content', 'write_file'.\n"
             "- Data analysis: 'data_analysis_calc', 'write_file'.\n"
             "- Software generation: 'write_file', 'read_file', 'list_files'.\n"
             "Requirements:\n"
-            "1. For software/web applications (e.g. portfolio website, landing page, app): plan distinct steps to create each needed file (index.html, style.css, script.js, README.md). Ensure files are complete with zero placeholders.\n"
+            "1. For software/web applications (e.g. portfolio website, landing page, app): plan distinct steps to create each needed file (index.html, style.css, script.js, README.md) using 'write_file'. Do NOT plan web_search or fetch_url_content unless external research is explicitly requested. For write_file steps, tool_args should ONLY specify {'path': '<filename>'}.\n"
             "2. For tool_args of 'list_files', use {\"directory\": \".\"}.\n"
             "Produce structured GoalPlan output."
         )
@@ -386,6 +387,19 @@ def _architect_agent(
                 )
             )
 
+        # Ensure software objectives do not retain accidental research tool calls
+        is_software = (
+            goal_plan.task_type in ("coding", "software")
+            or any(w in goal_plan.objective.lower() for w in ("website", "portfolio", "app", "code", "html", "css", "landing page"))
+        )
+        if is_software:
+            filtered = [
+                s for s in goal_plan.steps
+                if s.tool_name not in ("web_search", "get_github_repo_metadata", "fetch_url_content")
+            ]
+            if filtered:
+                goal_plan.steps = filtered
+
         task_plan = TaskPlan(implementation_steps=steps)
         return {
             "detailed_ins": task_plan,
@@ -445,61 +459,128 @@ def _coder_agent(
                     needs_synthesis = True
                 elif bool(has_unresolved_placeholders(content)):
                     needs_synthesis = True
-                elif is_code_file:
+                elif is_code_file or is_software_task:
                     stripped_c = content.strip()
-                    if ext == ".css" and (len(stripped_c) < 80 or len(re.findall(r"[^{}]+\{[^{}]+\}", stripped_c)) < 2):
+                    # If content contains transport-escaped newlines or lacks real newlines, synthesize complete code
+                    if r"\n" in stripped_c or "\n" not in stripped_c:
                         needs_synthesis = True
-                    elif ext in (".html", ".htm") and (len(stripped_c) < 100 or "<body" not in stripped_c.lower()):
+                    elif ext in (".html", ".htm") and (len(stripped_c) < 500 or "<body" not in stripped_c.lower()):
                         needs_synthesis = True
-                    elif ext == ".js" and len(stripped_c) < 30:
+                    elif ext == ".css" and (len(stripped_c) < 250 or len(re.findall(r"[^{}]+\{[^{}]+\}", stripped_c)) < 3):
                         needs_synthesis = True
-                    elif re.match(r"^\s*(/\*[\s\S]*?\*/|<!--[\s\S]*?-->|//.*|#.*)\s*$", stripped_c):
+                    elif ext == ".js" and len(stripped_c) < 50:
                         needs_synthesis = True
+                    elif ext == ".md" and is_software_task and ("langgraph" in stripped_c.lower() or len(stripped_c) < 100):
+                        needs_synthesis = True
+                    else:
+                        no_comments_c = re.sub(r"/\*[\s\S]*?\*/|<!--[\s\S]*?-->|//.*|#.*", "", stripped_c).strip()
+                        if not no_comments_c and stripped_c:
+                            needs_synthesis = True
                 elif len(content.strip()) < 10:
                     needs_synthesis = True
 
                 if needs_synthesis:
+                    sibling_files_context = ""
+                    for r in execution_records:
+                        if r.tool_name == "write_file" and r.status == "success":
+                            sib_path = r.tool_args.get("path")
+                            if sib_path and sib_path != path:
+                                try:
+                                    sib_content = read_text_file(sib_path)
+                                    sibling_files_context += f"\nFile '{sib_path}':\n```\n{sib_content[:2500]}\n```\n"
+                                except Exception:
+                                    pass
+
+                    is_calculator = "calculator" in goal_plan.objective.lower() or any("calculator" in s.title.lower() for s in goal_plan.steps)
                     if is_code_file or (is_software_task and not ext.endswith(".md")):
                         # Software code generation with sibling file awareness
-                        sibling_files_context = ""
-                        for r in execution_records:
-                            if r.tool_name == "write_file" and r.status == "success":
-                                sib_path = r.tool_args.get("path")
-                                if sib_path and sib_path != path:
-                                    try:
-                                        sib_content = read_text_file(sib_path)
-                                        sibling_files_context += f"\nFile '{sib_path}':\n```\n{sib_content[:2000]}\n```\n"
-                                    except Exception:
-                                        pass
-
-                        code_prompt = (
-                            f"User Objective: {goal_plan.objective}\n"
-                            f"Task: {step.title}\n"
-                            f"Target File: {path}\n\n"
-                            + (f"Previously generated files in workspace:\n{sibling_files_context}\n" if sibling_files_context else "")
-                            + "Instruction: Write the COMPLETE, fully implemented, production-ready code for this file.\n"
-                            "STRICT REQUIREMENTS:\n"
-                            "1. ZERO PLACEHOLDERS: Absolutely NO placeholder comments (e.g. NEVER output '/* CSS placeholder */', '<!-- TODO -->', '// To be implemented').\n"
-                            "2. If CSS (style.css): Provide a complete, modern responsive stylesheet with CSS custom properties (variables), reset, typography, header/navigation styles, hero section, portfolio project cards, skills section, contact form styling, animations/transitions, and media queries for mobile and tablet responsiveness.\n"
-                            "3. If HTML (index.html): Provide complete, semantic HTML5 structure with <!DOCTYPE html>, <head> with meta tags and stylesheet link, <header> with nav, Hero, About/Bio, Projects showcase, Skills, Contact, <footer>, and <script src=\"script.js\"></script>.\n"
-                            "4. If JavaScript (script.js): Provide working interactive client-side logic (smooth scrolling, active link highlighting, mobile menu toggle, contact form submit event prevention with feedback).\n"
-                            "5. Output ONLY the raw file contents with no explanatory prose. Avoid markdown code block backticks if possible."
-                        )
+                        if is_calculator:
+                            code_prompt = (
+                                f"User Objective: {goal_plan.objective}\n"
+                                f"Task: {step.title}\n"
+                                f"Target File: {path}\n\n"
+                                + (f"Previously generated files in workspace:\n{sibling_files_context}\n" if sibling_files_context else "")
+                                + "Instruction: Write the COMPLETE, fully implemented, production-ready code for this calculator application file.\n"
+                                "STRICT REQUIREMENTS:\n"
+                                "1. ZERO PLACEHOLDERS: Absolutely NO placeholder comments or stub code.\n"
+                                "2. If CSS (style.css): Provide a complete, modern responsive stylesheet with CSS custom properties (variables), reset, typography, centered calculator card layout, display screen with formula and result views, grid keypad layout, distinct operator (+, −, ×, ÷), equals (=), and clear (C) button styling with active/hover states, and mobile media queries.\n"
+                                "3. If HTML (index.html): Provide complete, semantic HTML5 structure with <!DOCTYPE html>, <head> with meta viewport and <link rel=\"stylesheet\" href=\"style.css\">, calculator display element (#display or .display), buttons for digits (0-9), decimal (.), operations (+, −, ×, ÷), equals (=), clear (C), backspace (⌫), percent (%), and <script src=\"script.js\"></script>. Must properly reference style.css and script.js.\n"
+                                "4. If JavaScript (script.js): Provide complete arithmetic computation logic. Correctly handle: addition (7+8=15), subtraction (10-4=6), multiplication (6*7=42), division (20/4=5), decimals (allow decimal point on each operand, e.g. 3.5+2.1=5.6), clear (C resets to 0), backspace (removes last char), percentage (50% = 0.5), division by zero displaying 'Error', keyboard events, and zero runtime errors.\n"
+                                "5. Output ONLY the raw file contents with no explanatory prose. Avoid markdown code block backticks if possible."
+                            )
+                        else:
+                            code_prompt = (
+                                f"User Objective: {goal_plan.objective}\n"
+                                f"Task: {step.title}\n"
+                                f"Target File: {path}\n\n"
+                                + (f"Previously generated files in workspace:\n{sibling_files_context}\n" if sibling_files_context else "")
+                                + "Instruction: Write the COMPLETE, fully implemented, production-ready code for this file tailored to the user's objective.\n"
+                                "STRICT REQUIREMENTS:\n"
+                                "1. ZERO PLACEHOLDERS: Absolutely NO placeholder comments (e.g. NEVER output '/* CSS placeholder */', '<!-- TODO -->', '// To be implemented').\n"
+                                "2. If CSS (style.css): Provide a complete, modern responsive stylesheet with CSS custom properties (variables), reset, typography, UI components matching the objective, transitions/animations, and media queries for responsiveness.\n"
+                                "3. If HTML (index.html): Provide complete, semantic HTML5 structure with <!DOCTYPE html>, <head> with meta tags and <link rel=\"stylesheet\" href=\"style.css\">, semantic structure matching the objective, and <script src=\"script.js\"></script>. Must link style.css and script.js.\n"
+                                "4. If JavaScript (script.js): Provide working interactive client-side logic implementing all necessary behavior, calculations, and event handlers for the objective without runtime errors.\n"
+                                "5. Output ONLY the raw file contents with no explanatory prose. Avoid markdown code block backticks if possible."
+                            )
                         content_resp = llm.invoke(code_prompt)
                         raw_content = getattr(content_resp, "content", str(content_resp))
-                        # Strip outer markdown backtick fences if present
-                        cleaned = raw_content.strip()
-                        m_fence = re.match(r"^```(?:[a-zA-Z0-9_\-\+]*)\r?\n([\s\S]*?)\r?\n```\s*$", cleaned)
-                        if m_fence:
-                            content = m_fence.group(1).strip()
+                        content = clean_transport_escapes(raw_content, file_path=path)
+
+                        # Bounded retry: validate generated source and attempt single correction if issues detected
+                        validation_issues = validate_source_code(path, content)
+                        if validation_issues:
+                            logger.info("Correction needed for %s: %s", path, validation_issues)
+                            corr_prompt = (
+                                f"User Objective: {goal_plan.objective}\n"
+                                f"Target File: {path}\n\n"
+                                f"The previously generated code had the following defect(s):\n"
+                                + "\n".join(f"- {iss}" for iss in validation_issues)
+                                + "\n\nInstruction: Rewrite the COMPLETE, corrected file fixing all defects above. Output ONLY raw code."
+                            )
+                            try:
+                                corr_resp = llm.invoke(corr_prompt)
+                                raw_corr = getattr(corr_resp, "content", str(corr_resp))
+                                content = clean_transport_escapes(raw_corr, file_path=path)
+                            except Exception as c_err:
+                                logger.warning("Correction attempt failed: %s", c_err)
+
+                    elif is_software_task and ext.endswith(".md"):
+                        # Software project documentation
+                        if is_calculator:
+                            readme_prompt = (
+                                f"User Objective: {goal_plan.objective}\n"
+                                f"Task: {step.title}\n"
+                                f"Target File: {path}\n\n"
+                                + (f"Generated Project Files:\n{sibling_files_context}\n" if sibling_files_context else "")
+                                + "Instruction: Write a complete, comprehensive, professional README.md for this calculator software project.\n"
+                                "Include:\n"
+                                "1. Project Title & Overview (Modern Web Calculator Application).\n"
+                                "2. Key Features (Full arithmetic engine, responsive keypad, decimal support, division by zero handling, keyboard navigation).\n"
+                                "3. Project File Structure (index.html, style.css, script.js, README.md).\n"
+                                "4. Live Preview & Local Development Instructions.\n"
+                                "5. Usage instructions and supported operations.\n"
+                                "Output ONLY the complete Markdown document with zero placeholders."
+                            )
                         else:
-                            blocks = re.findall(r"```(?:[a-zA-Z0-9_\-\+]*)\r?\n([\s\S]*?)\r?\n```", cleaned)
-                            if len(blocks) == 1:
-                                content = blocks[0].strip()
-                            else:
-                                content = cleaned
+                            readme_prompt = (
+                                f"User Objective: {goal_plan.objective}\n"
+                                f"Task: {step.title}\n"
+                                f"Target File: {path}\n\n"
+                                + (f"Generated Project Files:\n{sibling_files_context}\n" if sibling_files_context else "")
+                                + "Instruction: Write a complete, comprehensive, professional README.md for this software project.\n"
+                                "Include:\n"
+                                f"1. Project Title & Overview (tailored to {goal_plan.objective}).\n"
+                                "2. Key Features and technical implementation.\n"
+                                "3. Project File Structure (index.html, style.css, script.js, README.md).\n"
+                                "4. Live Preview & Local Development Instructions.\n"
+                                "Output ONLY the complete Markdown document with zero placeholders."
+                            )
+                        content_resp = llm.invoke(readme_prompt)
+                        raw_content = getattr(content_resp, "content", str(content_resp))
+                        content = clean_transport_escapes(raw_content, file_path=path)
+
                     else:
-                        # Compile evidence cleanly with source URLs (avoiding step-X labels in prompt)
+                        # Research synthesis
                         evidence_snippets: list[str] = []
                         step_to_url: dict[str, str] = {}
                         for r in execution_records:
@@ -552,7 +633,12 @@ def _coder_agent(
                         content = re.sub(r"【[^】]*】", _replace_cite, raw_content)
                         content = re.sub(r"\[\s*step-\d+[†$]source\s*\]", _replace_cite, content)
                         content = re.sub(r"\[\s*\d+[†$]source\s*\]", _replace_cite, content)
+                        content = clean_transport_escapes(content, file_path=path)
 
+                # Ensure final content is clean and reflected in tool args
+                content = clean_transport_escapes(content, file_path=path)
+                tool_args["content"] = content
+                step.tool_args["content"] = content
                 result = GLOBAL_TOOL_REGISTRY.execute("write_file", {"path": path, "content": content})
 
             else:

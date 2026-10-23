@@ -1,21 +1,1037 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#FBFAF7" />
-    <meta
-      name="description"
-      content="The agentic coding platform for tinkerers. Agent Co runs a three-node LangGraph workflow — planner, architect, coder — and streams every node transition, log line and generated file to the browser while it works."
-    />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <title>Agent Co — planner, architect, coder</title>
-  </head>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content, viewport-fit=cover">
+    <title>Rorak AI | Your AI Assistant</title>
+    
+    <!-- Meta & SEO Tags -->
+    <meta name="description" content="Rorak AI — Your AI Assistant for document-grounded knowledge, analysis, and exploration.">
+    <meta property="og:title" content="Rorak AI | Your AI Assistant">
+    <meta property="og:description" content="Rorak AI is a document-grounded generative AI assistant. Upload documents and explore grounded answers.">
+    <meta property="og:url" content="https://rorak.tech">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Rorak AI | Your AI Assistant">
+    <meta name="twitter:description" content="Rorak AI is a document-grounded generative AI assistant. Upload documents and explore grounded answers.">
 
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+    <!-- Cache control -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 32 32' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='32' height='32' rx='6' fill='%23111'/%3E%3Cpath d='M8 5h11c4.5 0 8 3.2 8 7.5 0 3.5-2.2 6.2-5.5 7.2L28 28h-5.5l-6-8H13v8H8V5zm5 4v7.5h5.5c2.5 0 4.5-1.7 4.5-3.8s-2-3.7-4.5-3.7H13z' fill='white'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="style.css?v=2.8.0">
+    <!-- Markdown Parser and DOM Sanitizer for secure rich text rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.1/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
+</head>
+<body>
+
+    <div class="app">
+
+        <!-- Top disclaimer banner -->
+        <div class="disclaimer-bar">
+            Rorak AI can make mistakes.
+        </div>
+
+        <div class="app-body">
+
+            <!-- Sidebar panel -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-top">
+                    <!-- Brand + Mobile Close -->
+                    <div class="sidebar-brand">
+                        <div class="brand-left">
+                            <img src="logo.jpg" alt="Rorak AI" class="brand-logo">
+                            <span class="brand-text">Rorak AI</span>
+                        </div>
+                        <button class="btn-sidebar-close" id="sidebarCloseBtn" aria-label="Close sidebar">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="18" y1="6" x2="6" y2="18"></line>
+                                <line x1="6" y1="6" x2="18" y2="18"></line>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <!-- Navigation -->
+                    <nav class="sidebar-nav">
+                        <a class="nav-item active" id="navChatBtn" href="#">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            Chat
+                        </a>
+                        <a class="nav-item" id="navMemoryBtn" href="#">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 2a5 5 0 0 1 5 5v1a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5z"></path>
+                                <path d="M19 11v1a7 7 0 0 1-14 0v-1"></path>
+                                <line x1="12" y1="19" x2="12" y2="22"></line>
+                                <line x1="8" y1="22" x2="16" y2="22"></line>
+                            </svg>
+                            Memory
+                        </a>
+                        <a class="nav-item" id="navAgentBtn" href="#" title="Agent Co Workspace">
+                            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                                <line x1="8" y1="21" x2="16" y2="21"></line>
+                                <line x1="12" y1="17" x2="12" y2="21"></line>
+                            </svg>
+                            Agent Workspace
+                        </a>
+                    </nav>
+
+                    <!-- Conversations Section -->
+                    <div class="sidebar-section-divider"></div>
+                    <div class="sidebar-conversations-section" id="sidebarConversationsSection">
+                        <div class="conversations-header">
+                            <span class="conversations-title">Recent Chats</span>
+                            <button class="btn-new-chat" id="btnNewChat" title="Start new conversation">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                </svg>
+                                <span>New</span>
+                            </button>
+                        </div>
+                        <div class="conversations-list-container" id="convListContainer">
+                            <div class="conversations-list" id="convList">
+                                <!-- Populated dynamically via script.js -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Agent Projects Section -->
+                    <div class="sidebar-agent-section" id="sidebarAgentSection" style="display: none;">
+                        <div class="conversations-header">
+                            <span class="conversations-title">Projects</span>
+                            <button class="btn-new-chat" id="btnNewProject" title="Create new project">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                </svg>
+                                <span>New</span>
+                            </button>
+                        </div>
+                        <div class="conversations-list-container" id="projectListContainer">
+                            <div class="conversations-list" id="projectList">
+                                <!-- Populated dynamically via script.js -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-bottom">
+                    <div class="sidebar-tagline">
+                        <svg class="tagline-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z"/></svg>
+                        <span>Rorak AI remembers, understands, and helps you achieve more.</span>
+                    </div>
+                    <button class="btn-custom-keys" id="sidebarCustomKeysBtn" title="External APIs & Custom Keys">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 2l-2 2m-1.5 1.5L16 7l-2-2m-1 5l2 2m-4.5 4.5a5.5 5.5 0 1 1-7.78-7.78 5.5 5.5 0 0 1 7.78 7.78z"></path>
+                        </svg>
+                        <span>Custom Keys</span>
+                        <span class="custom-key-dot" id="sidebarKeyStatusDot" style="display: none;"></span>
+                    </button>
+                    <div class="sidebar-footer" id="sidebarFooter">
+                        <div class="user-profile-widget" id="userProfileWidget" style="display: none;">
+                            <div class="user-avatar" id="sidebarUserAvatar">U</div>
+                            <div class="user-info">
+                                <span class="user-email" id="sidebarUserEmail" title="">user@example.com</span>
+                            </div>
+                            <button class="btn-logout" id="sidebarLogoutBtn" title="Sign out" aria-label="Sign out">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                                    <polyline points="16 17 21 12 16 7"></polyline>
+                                    <line x1="21" y1="12" x2="9" y2="12"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <button class="btn-signin" id="sidebarSignInBtn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+                                <polyline points="10 17 15 12 10 7"></polyline>
+                                <line x1="15" y1="12" x2="3" y2="12"></line>
+                            </svg>
+                            <span>Sign In</span>
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Mobile sidebar overlay -->
+            <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+            <!-- Main content area -->
+            <main class="main is-empty" id="mainArea">
+
+                <!-- Mobile menu toggle (three lines) -->
+                <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" title="Toggle menu">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+
+                <!-- Chat top corner action bar -->
+                <div class="chat-corner-bar" id="chatCornerBar">
+                    <button class="btn-files-in-chat" id="btnChatCustomKeys" title="External APIs & Custom Keys">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 2l-2 2m-1.5 1.5L16 7l-2-2m-1 5l2 2m-4.5 4.5a5.5 5.5 0 1 1-7.78-7.78 5.5 5.5 0 0 1 7.78 7.78z"></path>
+                        </svg>
+                        <span>Custom Key</span>
+                    </button>
+                    <button class="btn-files-in-chat" id="btnFilesInChat" title="Files in chat" aria-label="Files in chat">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                        </svg>
+                        <span>Files in chat</span>
+                    </button>
+                </div>
+
+                <!-- Empty state hero container (centered before first message) -->
+                <div class="empty-state" id="emptyState">
+                    <h1 class="empty-title" id="emptyGreeting">Ready when you are.</h1>
+                </div>
+
+                <!-- Chat messages (visible when active) -->
+                <div class="chat-messages" id="chatMessages"></div>
+
+                <!-- Input area (centered on landing, pinned bottom during chat) -->
+                <div class="input-area" id="inputArea">
+                    <div class="notification" id="notification"></div>
+                    <div class="upload-indicator" id="uploadIndicator"></div>
+                    
+                    <div class="input-bar">
+                        <button class="btn-upload" id="uploadBtn" title="Upload PDF">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                        </button>
+                        <input
+                            type="text"
+                            class="chat-input"
+                            id="chatInput"
+                            placeholder="Ask anything"
+                            autocomplete="off"
+                        >
+                        <div class="input-actions">
+                            <button class="btn-grounded-pill" id="groundedBadge" title="Grounded RAG Mode Active">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"></path>
+                                    <path d="M9 21h6"></path>
+                                </svg>
+                                <span>Grounded</span>
+                            </button>
+                            <button class="btn-send" id="sendBtn" title="Send">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="22" y1="2" x2="11" y2="13"/>
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Hidden file input for document upload -->
+                <input type="file" id="fileInput" accept=".pdf,.docx,.txt,.md,.csv" hidden>
+
+                <!-- "Files in chat" Slide-over Drawer Panel -->
+                <aside class="chat-files-drawer" id="chatFilesDrawer" aria-label="Files in chat" style="display: none;">
+                    <div class="drawer-header">
+                        <div class="drawer-header-left">
+                            <div class="drawer-header-title-row">
+                                <svg class="drawer-header-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 18px; height: 18px; min-width: 18px; max-width: 18px; flex-shrink: 0;">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14 2 14 8 20 8"></polyline>
+                                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                                </svg>
+                                <h3 class="drawer-title">Files in chat</h3>
+                                <span class="drawer-count-badge" id="drawerFilesCount">0</span>
+                            </div>
+                            <p class="drawer-subtitle">Documents isolated to this conversation.</p>
+                        </div>
+                        <div class="drawer-header-actions">
+                            <button class="btn-drawer-close" id="chatFilesCloseBtn" title="Close panel" aria-label="Close panel">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; flex-shrink: 0;">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Upload Progress Bar (Visible during upload) -->
+                    <div class="docs-upload-progress" id="docsUploadProgress" style="display: none;">
+                        <div class="progress-info">
+                            <span class="progress-file" id="progressFileName">uploading...</span>
+                            <span class="progress-status" id="progressStatusText">Uploading (0%)...</span>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-bar" id="progressBar" style="width: 0%;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Document Cards / List Container -->
+                    <div class="drawer-list-container" id="docsListContainer">
+                        <div class="drawer-list" id="docsList">
+                            <!-- Populated dynamically via script.js -->
+                        </div>
+                    </div>
+
+                    <!-- Pagination Controls -->
+                    <div class="docs-pagination drawer-pagination" id="docsPagination" style="display: none;">
+                        <button class="btn-page" id="btnPrevPage" disabled>&larr; Prev</button>
+                        <span class="page-indicator" id="pageIndicator">Page 1 of 1</span>
+                        <button class="btn-page" id="btnNextPage" disabled>Next &rarr;</button>
+                    </div>
+                </aside>
+
+                <!-- Memory Management Section -->
+                <section class="docs-section memory-section" id="memorySection" style="display: none;">
+                    <div class="docs-header">
+                        <div class="docs-header-left">
+                            <h2 class="docs-title">Memory Management</h2>
+                            <p class="docs-subtitle">Inspect and manage durable user preferences, work context, and system directives stored across conversations.</p>
+                        </div>
+                        <div class="docs-header-actions">
+                            <button class="btn-secondary" id="memoriesRefreshBtn" title="Refresh memory list">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <polyline points="1 20 1 14 7 14"></polyline>
+                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                                </svg>
+                                <span>Refresh</span>
+                            </button>
+                            <button class="btn-primary" id="memoriesAddBtn" title="Add Long-Term Memory">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                </svg>
+                                <span>Add Memory</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Memory Metrics bar -->
+                    <div class="docs-metrics-bar" id="memoriesMetricsBar">
+                        <div class="metric-item">
+                            <span class="metric-label">Total Memories</span>
+                            <span class="metric-value" id="metricTotalMemories">0</span>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-label">User Memories</span>
+                            <span class="metric-value" id="metricPersonalMemories">0</span>
+                        </div>
+                    </div>
+
+                    <!-- Memories Cards / List Container -->
+                    <div class="docs-list-container" id="memoriesListContainer">
+                        <div class="docs-list" id="memoriesList">
+                            <!-- Populated dynamically via script.js -->
+                        </div>
+                    </div>
+
+                    <!-- Pagination Controls -->
+                    <div class="docs-pagination" id="memoriesPagination" style="display: none;">
+                        <button class="btn-page" id="btnPrevMemPage" disabled>&larr; Previous</button>
+                        <span class="page-indicator" id="memPageIndicator">Page 1 of 1</span>
+                        <button class="btn-page" id="btnNextMemPage" disabled>Next &rarr;</button>
+                    </div>
+                </section>
+
+                <!-- Agent Workspace Section (3-Pane Antigravity IDE) -->
+                <section class="agent-workspace-section" id="agentWorkspaceSection" style="display: none;">
+                    <!-- Agent Toolbar -->
+                    <div class="agent-toolbar">
+                        <div class="agent-toolbar-left">
+                            <div class="agent-project-badge">
+                                <span class="project-indicator-dot"></span>
+                                <span class="agent-current-project-name" id="currentProjectName">Select or create a project</span>
+                            </div>
+                            <div class="agent-status-badges" id="agentStatusBadges" style="display: none;">
+                                <span class="agent-badge" id="badgeExecution">EXEC: IDLE</span>
+                                <span class="agent-badge" id="badgeDeliverable">DELIVERABLE: -</span>
+                                <span class="agent-badge" id="badgeVerification">VERIFICATION: -</span>
+                                <span class="agent-badge badge-objective" id="badgeObjective">OBJECTIVE: -</span>
+                            </div>
+                        </div>
+                        <div class="agent-toolbar-right">
+                            <button class="btn-secondary btn-sm" id="btnAgentCustomKeys" title="Configure Custom API Keys">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M21 2l-2 2m-1.5 1.5L16 7l-2-2m-1 5l2 2m-4.5 4.5a5.5 5.5 0 1 1-7.78-7.78 5.5 5.5 0 0 1 7.78 7.78z"></path>
+                                </svg>
+                                <span>Custom Key</span>
+                                <span class="custom-key-dot" id="agentKeyStatusDot" style="display: none;"></span>
+                            </button>
+                            <button class="btn-secondary btn-sm" id="btnRefreshWorkspace" title="Refresh files">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <polyline points="1 20 1 14 7 14"></polyline>
+                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                                </svg>
+                                <span>Refresh</span>
+                            </button>
+                            <button class="btn-primary btn-sm" id="btnDownloadZip" title="Download workspace as ZIP">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                                <span>Download ZIP</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Objective Prompt Bar -->
+                    <div class="agent-objective-bar">
+                        <div class="objective-input-container">
+                            <textarea id="agentObjectiveInput" placeholder="Enter objective (e.g. 'Compare LangGraph, CrewAI, AutoGen with source citations', or 'Analyze revenue CSV data', or 'Build a Flask REST API')..." rows="2"></textarea>
+                            <div class="objective-actions">
+                                <select id="agentTaskTypeSelect" class="agent-task-select" title="Task Type">
+                                    <option value="general">Auto-Detect</option>
+                                    <option value="research">Research & Citations</option>
+                                    <option value="data_analysis">Data Analysis</option>
+                                    <option value="software">Software Generation</option>
+                                </select>
+                                <button class="btn-primary btn-run" id="btnRunAgent" title="Run Objective">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                    </svg>
+                                    <span id="runBtnText">Run Objective</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 3-Pane IDE Container -->
+                    <div class="agent-panes-layout">
+                        <!-- Left Pane: File Tree -->
+                        <div class="agent-pane pane-files">
+                            <div class="pane-header">
+                                <div class="pane-header-title">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+                                    <span>Workspace</span>
+                                </div>
+                                <button class="pane-icon-btn" id="btnNewFile" title="New File">+</button>
+                            </div>
+                            <div class="file-tree-container" id="agentFileTree">
+                                <div class="empty-tree-message">No files yet. Run an objective or create a file.</div>
+                            </div>
+                        </div>
+
+                        <!-- Center Pane: Tabbed Editor & Live Preview -->
+                        <div class="agent-pane pane-editor">
+                            <div class="pane-header editor-header">
+                                <div class="editor-tabs" id="editorTabs">
+                                    <div class="editor-tab active" id="activeFileTab">
+                                        <span class="tab-filename" id="activeFileName">Welcome.md</span>
+                                        <span class="tab-dirty-indicator" id="fileDirtyIndicator" style="display:none;">*</span>
+                                    </div>
+                                </div>
+                                <div class="editor-mode-switcher">
+                                    <button type="button" class="mode-btn active" id="btnModeCode" title="View & Edit Source Code">Code</button>
+                                    <button type="button" class="mode-btn" id="btnModePreview" title="Live Preview Output">Preview</button>
+                                </div>
+                                <div class="editor-actions">
+                                    <button class="btn-xs btn-secondary" id="btnTogglePreview" title="Toggle Preview" style="display:none;">Preview</button>
+                                    <button class="btn-xs btn-primary" id="btnSaveFile" title="Save File (Ctrl+S)">Save</button>
+                                </div>
+                            </div>
+                            <div class="editor-content-area">
+                                <textarea class="code-editor-textarea" id="agentCodeEditor" spellcheck="false" placeholder="Select a file from the workspace tree to view or edit..."></textarea>
+                                
+                                <div class="workspace-preview-container" id="workspacePreviewContainer" style="display: none;">
+                                    <div class="preview-toolbar" id="previewToolbar">
+                                        <div class="preview-address-bar">
+                                            <span class="preview-status-dot" id="previewStatusDot" title="Live Preview Active"></span>
+                                            <span class="preview-address-text" id="previewAddressText">/index.html</span>
+                                        </div>
+                                        <div class="preview-viewport-controls">
+                                            <button type="button" class="preview-btn active" id="btnViewportDesktop" title="Desktop View (100%)">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                                                <span>Desktop</span>
+                                            </button>
+                                            <button type="button" class="preview-btn" id="btnViewportTablet" title="Tablet View (768px)">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+                                                <span>Tablet</span>
+                                            </button>
+                                            <button type="button" class="preview-btn" id="btnViewportMobile" title="Mobile View (375px)">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+                                                <span>Mobile</span>
+                                            </button>
+                                        </div>
+                                        <div class="preview-action-controls">
+                                            <button type="button" class="preview-btn icon-only" id="btnRefreshPreview" title="Refresh Live Preview">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                            </button>
+                                            <button type="button" class="preview-btn icon-only" id="btnPopoutPreview" title="Open in New Window / Tab">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                                            </button>
+                                            <button type="button" class="preview-btn icon-only" id="btnExpandPreview" title="Expand / Collapse Preview Pane">
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="preview-viewport-wrapper" id="previewViewportWrapper">
+                                        <div class="preview-viewport-frame desktop" id="previewViewportFrame">
+                                            <iframe id="workspacePreviewIframe" class="preview-iframe" sandbox="allow-scripts allow-forms allow-modals" src="about:blank"></iframe>
+                                            <div class="preview-dimension-badge" id="previewDimensionBadge">Desktop (100%)</div>
+                                        </div>
+                                        <div class="artifact-preview-pane" id="artifactPreviewPane" style="display: none;"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="editor-footer">
+                                <span id="editorStatusText">UTF-8</span>
+                                <span id="editorCursorPosition">Ln 1, Col 1</span>
+                            </div>
+                        </div>
+
+                        <!-- Right Pane: Agent Control Panel -->
+                        <div class="agent-pane pane-control">
+                            <div class="control-panel-tabs">
+                                <button class="control-tab-btn active" data-tab="graph" id="tabBtnGraph">Graph & Logs</button>
+                                <button class="control-tab-btn" data-tab="audit" id="tabBtnAudit">Audit Trail</button>
+                                <button class="control-tab-btn" data-tab="prompts" id="tabBtnPrompts">Prompts</button>
+                            </div>
+
+                            <!-- Tab 1: Graph & Logs -->
+                            <div class="control-tab-content active" id="controlTabGraph">
+                                <div class="execution-pipeline-nodes">
+                                    <div class="pipeline-node" id="nodePlanner">
+                                        <div class="node-indicator"></div>
+                                        <span class="node-name">Planner</span>
+                                        <span class="node-status" id="statusPlanner">idle</span>
+                                    </div>
+                                    <div class="pipeline-arrow">&rarr;</div>
+                                    <div class="pipeline-node" id="nodeArchitect">
+                                        <div class="node-indicator"></div>
+                                        <span class="node-name">Architect</span>
+                                        <span class="node-status" id="statusArchitect">idle</span>
+                                    </div>
+                                    <div class="pipeline-arrow">&rarr;</div>
+                                    <div class="pipeline-node" id="nodeCoder">
+                                        <div class="node-indicator"></div>
+                                        <span class="node-name">Coder</span>
+                                        <span class="node-status" id="statusCoder">idle</span>
+                                    </div>
+                                </div>
+                                <div class="streaming-logs-header">
+                                    <span>Activity Feed</span>
+                                    <button class="pane-icon-btn" id="btnClearLogs" title="Clear logs">&times;</button>
+                                </div>
+                                <div class="streaming-logs-console" id="streamingLogsConsole">
+                                    <div class="log-line log-system">Workspace initialized. Ready to execute objectives.</div>
+                                </div>
+                            </div>
+
+                            <!-- Tab 2: Audit Trail -->
+                            <div class="control-tab-content" id="controlTabAudit" style="display: none;">
+                                <div class="audit-summary-bar" id="auditSummaryBar">
+                                    <span id="auditActionsCount">0 actions executed</span>
+                                </div>
+                                <div class="audit-trail-list" id="auditTrailList">
+                                    <div class="audit-empty-state">No execution records yet. Run an objective to see deterministic action trails, tool calls, and citations.</div>
+                                </div>
+                            </div>
+
+                            <!-- Tab 3: Prompts -->
+                            <div class="control-tab-content" id="controlTabPrompts" style="display: none;">
+                                <div class="prompts-viewer">
+                                    <div class="prompt-viewer-group">
+                                        <label>Planner System Prompt</label>
+                                        <pre class="prompt-viewer-pre" id="promptPlannerViewer">Universal goal decomposition & action-oriented planning.</pre>
+                                    </div>
+                                    <div class="prompt-viewer-group">
+                                        <label>Evidence & Factual Synthesis Prompt</label>
+                                        <pre class="prompt-viewer-pre" id="promptSynthesisViewer">Enforces real Markdown source citations, zero unresolved templates, deterministic metrics.</pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+            </main>
+
+        </div>
+    </div>
+
+    <!-- Modals -->
+
+    <!-- Document Details Modal -->
+    <div class="modal-backdrop" id="docDetailsModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Document Metadata</h3>
+                <button class="modal-close" id="docDetailsCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body doc-details-body" id="docDetailsContent">
+                <!-- Populated dynamically via script.js -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="docDetailsDoneBtn">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Document Rename Modal -->
+    <div class="modal-backdrop" id="docRenameModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Rename Document</h3>
+                <button class="modal-close" id="docRenameCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-help">Change the file name of this document.</p>
+                <div class="form-group">
+                    <label for="renameInput">File Name (1–255 characters)</label>
+                    <input type="text" class="text-input" id="renameInput" maxlength="255" autocomplete="off" placeholder="e.g. Research_Paper.pdf">
+                    <div class="form-char-count" id="renameCharCount">0 / 255</div>
+                </div>
+                <div class="form-error" id="renameError" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="docRenameCancelBtn">Cancel</button>
+                <button class="btn-primary" id="docRenameSubmitBtn">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Document Delete Confirmation Modal -->
+    <div class="modal-backdrop" id="docDeleteModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Delete Document</h3>
+                <button class="modal-close" id="docDeleteCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="delete-warning-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                        <line x1="12" y1="9" x2="12" y2="13"></line>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                </div>
+                <p class="modal-confirm-text">Are you sure you want to delete <strong id="deleteDocName">this document</strong>?</p>
+                <p class="modal-help delete-help">This will permanently remove the document record, search vector embeddings, and physical disk artifacts. This action cannot be undone.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="docDeleteCancelBtn">Cancel</button>
+                <button class="btn-danger" id="docDeleteConfirmBtn">Delete Permanently</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Conversation Rename Modal -->
+    <div class="modal-backdrop" id="convRenameModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Rename Conversation</h3>
+                <button class="modal-close" id="convRenameCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-help">Change the title of this conversation thread.</p>
+                <div class="form-group">
+                    <label for="convRenameInput">Title (1–255 characters)</label>
+                    <input type="text" class="text-input" id="convRenameInput" maxlength="255" autocomplete="off" placeholder="e.g. Project Architecture Discussion">
+                    <div class="form-char-count" id="convRenameCharCount">0 / 255</div>
+                </div>
+                <div class="form-error" id="convRenameError" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="convRenameCancelBtn">Cancel</button>
+                <button class="btn-primary" id="convRenameSubmitBtn">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Conversation Delete Modal -->
+    <div class="modal-backdrop" id="convDeleteModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Delete Conversation</h3>
+                <button class="modal-close" id="convDeleteCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="delete-warning-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                        <line x1="12" y1="9" x2="12" y2="13"></line>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                </div>
+                <p class="modal-confirm-text">Are you sure you want to delete <strong id="deleteConvTitle">this conversation</strong>?</p>
+                <p class="modal-help delete-help">This will permanently delete the conversation and all associated message history. This action cannot be undone.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="convDeleteCancelBtn">Cancel</button>
+                <button class="btn-danger" id="convDeleteConfirmBtn">Delete Permanently</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Memory Delete Modal -->
+    <div class="modal-backdrop" id="memoryDeleteModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Delete Memory</h3>
+                <button class="modal-close" id="memoryDeleteCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="delete-warning-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                        <line x1="12" y1="9" x2="12" y2="13"></line>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                </div>
+                <p class="modal-confirm-text">Are you sure you want to delete this memory?</p>
+                <div class="modal-memory-preview" id="deleteMemoryPreview"></div>
+                <p class="modal-help delete-help">This memory will be permanently removed and no longer included in conversation context assembly. This action cannot be undone.</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="memoryDeleteCancelBtn">Cancel</button>
+                <button class="btn-danger" id="memoryDeleteConfirmBtn">Delete Permanently</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Memory Add Modal -->
+    <div class="modal-backdrop" id="memoryAddModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Add Durable Memory</h3>
+                <button class="modal-close" id="memoryAddCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-help">Store a durable fact, user preference, or system directive that Rorak AI will remember across conversations.</p>
+                <div class="form-group">
+                    <label for="memoryAddContent">Memory Content</label>
+                    <textarea class="textarea-input" id="memoryAddContent" rows="3" placeholder="e.g. Always respond with concise code examples and avoid excessive pleasantries."></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group form-col">
+                        <label for="memoryAddType">Type</label>
+                        <select class="select-input" id="memoryAddType">
+                            <option value="user_preference">User Preference</option>
+                            <option value="work_context">Work Context</option>
+                            <option value="project_fact">Project Fact</option>
+                            <option value="system_directive" selected>System Directive</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-error" id="memoryAddError" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="memoryAddCancelBtn">Cancel</button>
+                <button class="btn-primary" id="memoryAddSubmitBtn">Save Memory</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Authentication Modal -->
+    <div class="modal-backdrop" id="authModal" style="display: none;">
+        <div class="modal-dialog auth-dialog">
+            <div class="auth-header">
+                <div class="auth-brand">
+                    <img src="logo.jpg" alt="Rorak AI" class="auth-logo">
+                    <div class="auth-brand-text">
+                        <span class="auth-title">Rorak AI</span>
+                    </div>
+                </div>
+                <button class="modal-close" id="authCloseBtn" title="Close" aria-label="Close dialog">&times;</button>
+            </div>
+
+            <p class="auth-subtitle" id="authSubtitle">Sign in to access your chats, documents, and memories.</p>
+
+            <div class="auth-tabs" role="tablist">
+                <button class="auth-tab active" id="authTabLogin" type="button" role="tab" aria-selected="true">Sign In</button>
+                <button class="auth-tab" id="authTabRegister" type="button" role="tab" aria-selected="false">Create Account</button>
+            </div>
+
+            <!-- Login Form -->
+            <form class="auth-form" id="loginForm" novalidate>
+                <div class="form-group">
+                    <label for="loginEmail">Email Address</label>
+                    <div class="input-with-icon">
+                        <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+                            <polyline points="22,6 12,13 2,6"></polyline>
+                        </svg>
+                        <input type="email" class="text-input" id="loginEmail" placeholder="you@example.com" autocomplete="email" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="loginPassword">Password</label>
+                    <div class="input-with-icon">
+                        <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                        <input type="password" class="text-input" id="loginPassword" placeholder="••••••••" autocomplete="current-password" required>
+                        <button type="button" class="btn-toggle-password" id="toggleLoginPassword" aria-label="Toggle password visibility">
+                            <svg class="eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            <svg class="eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="form-error" id="loginError" style="display: none;"></div>
+
+                <button type="submit" class="btn-primary auth-submit-btn" id="loginSubmitBtn">
+                    <span>Sign In</span>
+                </button>
+
+                <div class="auth-switch-prompt">
+                    Don't have an account? <a href="#" id="switchToRegisterLink">Create one now</a>
+                </div>
+            </form>
+
+            <!-- Register Form -->
+            <form class="auth-form" id="registerForm" style="display: none;" novalidate>
+                <div class="form-group">
+                    <label for="registerName">Full Name</label>
+                    <div class="input-with-icon">
+                        <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                            <circle cx="12" cy="7" r="4"></circle>
+                        </svg>
+                        <input type="text" class="text-input" id="registerName" placeholder="Your name" autocomplete="name" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="registerEmail">Email Address</label>
+                    <div class="input-with-icon">
+                        <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+                            <polyline points="22,6 12,13 2,6"></polyline>
+                        </svg>
+                        <input type="email" class="text-input" id="registerEmail" placeholder="you@example.com" autocomplete="email" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="registerPassword">Password</label>
+                    <div class="input-with-icon">
+                        <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                        <input type="password" class="text-input" id="registerPassword" placeholder="Minimum 8 characters" autocomplete="new-password" minlength="8" required>
+                        <button type="button" class="btn-toggle-password" id="toggleRegisterPassword" aria-label="Toggle password visibility">
+                            <svg class="eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            <svg class="eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                        </button>
+                    </div>
+                    <div class="form-hint">At least 8 characters</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="registerConfirmPassword">Confirm Password</label>
+                    <div class="input-with-icon">
+                        <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                        <input type="password" class="text-input" id="registerConfirmPassword" placeholder="Re-enter your password" autocomplete="new-password" minlength="8" required>
+                    </div>
+                </div>
+
+                <div class="form-error" id="registerError" style="display: none;"></div>
+
+                <button type="submit" class="btn-primary auth-submit-btn" id="registerSubmitBtn">
+                    <span>Create Account</span>
+                </button>
+
+                <div class="auth-switch-prompt">
+                    Already have an account? <a href="#" id="switchToLoginLink">Sign in instead</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- New Project Modal -->
+    <div class="modal-backdrop" id="newProjectModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Create New Project</h3>
+                <button class="modal-close" id="newProjectCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="projectNameInput">Project Name</label>
+                    <input type="text" class="text-input" id="projectNameInput" placeholder="e.g. Research Benchmark, Data Pipeline, Weather App" maxlength="100" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="projectDescInput">Description (Optional)</label>
+                    <textarea class="text-input" id="projectDescInput" rows="2" placeholder="Brief description of the project objective" maxlength="500"></textarea>
+                </div>
+                <div class="form-error" id="newProjectError" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="newProjectCancelBtn">Cancel</button>
+                <button class="btn-primary" id="newProjectSubmitBtn">Create Project</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- New File Modal -->
+    <div class="modal-backdrop" id="newFileModal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Create New Workspace File</h3>
+                <button class="modal-close" id="newFileCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="newFileNameInput">File Path</label>
+                    <input type="text" class="text-input" id="newFileNameInput" placeholder="e.g. report.md, app.py, data/metrics.csv" maxlength="200" autocomplete="off">
+                </div>
+                <div class="form-error" id="newFileError" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="newFileCancelBtn">Cancel</button>
+                <button class="btn-primary" id="newFileSubmitBtn">Create File</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom API Keys & External Providers Modal -->
+    <div class="modal-backdrop" id="customKeysModal" style="display: none;">
+        <div class="modal-dialog custom-keys-dialog">
+            <div class="modal-header">
+                <div class="modal-header-icon-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-accent">
+                        <path d="M21 2l-2 2m-1.5 1.5L16 7l-2-2m-1 5l2 2m-4.5 4.5a5.5 5.5 0 1 1-7.78-7.78 5.5 5.5 0 0 1 7.78 7.78z"></path>
+                    </svg>
+                    <h3 class="modal-title">External API & Custom Keys</h3>
+                </div>
+                <button class="modal-close" id="customKeysCloseBtn" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-help">
+                    Connect your own external API keys for LLM responses and autonomous agent execution. Keys are stored locally in your browser and used whenever you prompt Rorak AI.
+                </p>
+
+                <!-- Provider Selector Tabs -->
+                <div class="key-provider-tabs" role="tablist">
+                    <button class="key-provider-tab active" data-provider="default" id="tabKeyDefault" type="button">Default (Server)</button>
+                    <button class="key-provider-tab" data-provider="groq" id="tabKeyGroq" type="button">Groq</button>
+                    <button class="key-provider-tab" data-provider="openai" id="tabKeyOpenAI" type="button">OpenAI</button>
+                    <button class="key-provider-tab" data-provider="custom" id="tabKeyCustom" type="button">Custom / Ollama</button>
+                </div>
+
+                <!-- Provider 1: Default / Server Environment -->
+                <div class="provider-panel" id="panelKeyDefault">
+                    <div class="default-provider-info">
+                        <div class="status-badge-row">
+                            <span class="badge-dot-green"></span>
+                            <strong id="serverConfigStatusText">Using Server Environment Key</strong>
+                        </div>
+                        <p class="text-muted" style="margin-top: 8px; font-size: 13px; line-height: 1.5;">
+                            The application is currently utilizing the server-configured Groq API key and default models. Switch to one of the tabs above to provide and use your own external API key.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Provider 2: Groq -->
+                <div class="provider-panel" id="panelKeyGroq" style="display: none;">
+                    <div class="form-group">
+                        <label for="inputGroqApiKey">Groq API Key</label>
+                        <div class="input-with-icon">
+                            <input type="password" class="text-input" id="inputGroqApiKey" placeholder="gsk_..." autocomplete="off">
+                            <button type="button" class="btn-toggle-password" id="toggleGroqKeyVisibility" title="Toggle visibility">
+                                <svg class="eye-open" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </button>
+                        </div>
+                        <div class="form-hint">Obtain free from <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color: var(--accent);">console.groq.com</a></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="inputGroqModel">Groq Model (Optional)</label>
+                        <select class="select-input" id="inputGroqModel">
+                            <option value="openai/gpt-oss-120b" selected>openai/gpt-oss-120b (Recommended)</option>
+                            <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (Fast)</option>
+                            <option value="qwen/qwen3.8-27b">qwen/qwen3.8-27b</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Provider 3: OpenAI -->
+                <div class="provider-panel" id="panelKeyOpenAI" style="display: none;">
+                    <div class="form-group">
+                        <label for="inputOpenAIApiKey">OpenAI API Key</label>
+                        <div class="input-with-icon">
+                            <input type="password" class="text-input" id="inputOpenAIApiKey" placeholder="sk-..." autocomplete="off">
+                            <button type="button" class="btn-toggle-password" id="toggleOpenAIKeyVisibility" title="Toggle visibility">
+                                <svg class="eye-open" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </button>
+                        </div>
+                        <div class="form-hint">Obtain from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" style="color: var(--accent);">platform.openai.com</a></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="inputOpenAIModel">OpenAI Model</label>
+                        <select class="select-input" id="inputOpenAIModel">
+                            <option value="gpt-4o">gpt-4o (Most Capable)</option>
+                            <option value="gpt-4o-mini" selected>gpt-4o-mini (Fast & Efficient)</option>
+                            <option value="o1-mini">o1-mini (Reasoning)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Provider 4: Custom / OpenAI-Compatible (Ollama, OpenRouter, DeepSeek) -->
+                <div class="provider-panel" id="panelKeyCustom" style="display: none;">
+                    <div class="form-group">
+                        <label for="inputCustomBaseUrl">Base URL</label>
+                        <input type="text" class="text-input" id="inputCustomBaseUrl" placeholder="http://localhost:11434/v1 or https://openrouter.ai/api/v1" autocomplete="off">
+                        <div class="form-hint">Works with local Ollama, vLLM, OpenRouter, DeepSeek, LocalAI, etc.</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="inputCustomApiKey">API Key / Token (if required)</label>
+                        <div class="input-with-icon">
+                            <input type="password" class="text-input" id="inputCustomApiKey" placeholder="sk-or-... or leave empty for Ollama" autocomplete="off">
+                            <button type="button" class="btn-toggle-password" id="toggleCustomKeyVisibility" title="Toggle visibility">
+                                <svg class="eye-open" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="inputCustomModelName">Model Identifier</label>
+                        <input type="text" class="text-input" id="inputCustomModelName" placeholder="e.g. deepseek-r1, llama3, qwen2.5:32b, mistral" autocomplete="off">
+                    </div>
+                </div>
+
+                <!-- Web Search (Tavily) Section -->
+                <div class="key-section-divider"></div>
+                <div class="form-group">
+                    <label for="inputTavilyApiKey">Tavily Web Search API Key (Optional)</label>
+                    <div class="input-with-icon">
+                        <input type="password" class="text-input" id="inputTavilyApiKey" placeholder="tvly-..." autocomplete="off">
+                        <button type="button" class="btn-toggle-password" id="toggleTavilyKeyVisibility" title="Toggle visibility">
+                            <svg class="eye-open" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                        </button>
+                    </div>
+                    <div class="form-hint">Used for live web research citations in Agent Workspace</div>
+                </div>
+
+                <!-- Validation Status Banner -->
+                <div class="key-validation-status" id="customKeysTestResult" style="display: none;"></div>
+            </div>
+            <div class="modal-footer custom-keys-footer">
+                <button class="btn-secondary" id="btnCustomKeysReset" type="button">Reset to Default</button>
+                <div class="footer-right-actions">
+                    <button class="btn-secondary" id="btnCustomKeysTest" type="button">Test Connection</button>
+                    <button class="btn-primary" id="btnCustomKeysSave" type="button">Save & Apply</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js?v=2.8.0"></script>
+</body>
 </html>

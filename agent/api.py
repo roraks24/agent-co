@@ -13,17 +13,35 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
-from typing import Any
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+from uuid import UUID
+
+from agent.db.database import get_db, get_db_context
+from agent.core.auth import get_optional_current_user
+from agent.core.security import create_access_token, hash_password, verify_password
+from agent.db.models.user import User
+from agent.db.models.conversation import Conversation
+from agent.db.models.message import Message
+from agent.db.models.memory import Memory
+from agent.db.repositories.user_repository import UserRepository
+from agent.db.repositories.project_repository import ProjectRepository
+from agent.db.repositories.workspace_repository import WorkspaceRepository
+from agent.db.repositories.agent_run_repository import AgentRunRepository
+from agent.db.repositories.conversation_repository import ConversationRepository
+from agent.db.repositories.memory_repository import MemoryRepository
+from agent.db.services.project_service import ProjectService, ProjectOwnershipError
+from agent.db.services.agent_run_service import AgentRunService
 
 try:  # pragma: no cover - supports script execution
     from .graph import astream_workflow, get_graph_schema, run_workflow
@@ -38,6 +56,11 @@ try:  # pragma: no cover - supports script execution
     from .tools_registry import GLOBAL_TOOL_REGISTRY
     from .security_config import SecurityConfig, load_security_config
     from . import workspace as workspace_service
+    from .adaptive import (
+        GLOBAL_ADAPTIVE_PIPELINE,
+        TaskIntakeRequest,
+        build_response_selection_metadata,
+    )
 except ImportError:  # pragma: no cover
     from graph import astream_workflow, get_graph_schema, run_workflow
     from llm_factory import DEFAULT_GROQ_MODEL, PROVIDER_NAME, build_chat_model
@@ -51,6 +74,11 @@ except ImportError:  # pragma: no cover
     from tools_registry import GLOBAL_TOOL_REGISTRY
     from security_config import SecurityConfig, load_security_config
     import workspace as workspace_service
+    from adaptive import (
+        GLOBAL_ADAPTIVE_PIPELINE,
+        TaskIntakeRequest,
+        build_response_selection_metadata,
+    )
 
 logger = logging.getLogger(__name__)
 SECURITY_CONFIG: SecurityConfig = load_security_config()
@@ -78,6 +106,14 @@ class RunWorkflowRequest(BaseModel):
     workspace_id: str | None = None
     model: str | None = None
     recursion_limit: int = Field(default=100, ge=1, le=1000)
+    task_type: str | None = None
+    desired_quality: str | None = None
+    max_latency: float | None = None
+    budget: str | float | None = None
+    context_length: int | None = None
+    file_inputs: list[Any] | None = None
+    modalities: list[str] | None = None
+    preferred_provider: str | None = None
 
 
 class RunWorkflowResponse(BaseModel):
@@ -91,6 +127,7 @@ class RunWorkflowResponse(BaseModel):
     objective_status: str | None = None
     final_summary: str | None = None
     verification: VerificationResult | None = None
+    adaptive_selection: dict[str, Any] | None = None
 
 
 class WorkspaceTreeResponse(BaseModel):
@@ -135,6 +172,42 @@ class WorkspaceRenameRequest(BaseModel):
 class WorkspaceSessionResponse(BaseModel):
     workspace_id: str
     expires_at: str
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str | None = None
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    status: str = "active"
+    created_at: str
+    updated_at: str
+
+
+class AgentRunSummaryResponse(BaseModel):
+    id: str
+    project_id: str
+    workspace_id: str
+    objective: str
+    task_type: str
+    execution_status: str
+    objective_status: str
+    started_at: str
+    completed_at: str | None = None
+
+
+class AgentRunDetailResponse(AgentRunSummaryResponse):
+    plan_json: Any = None
+    execution_records: list[dict[str, Any]] = []
+    evidence_summary: str | None = None
+    final_summary: str | None = None
+    error_message: str | None = None
+    deliverable_status: str | None = None
+    source_verification_status: str | None = None
 
 
 NODE_IDS = ("planner", "architect", "coder")
@@ -877,6 +950,128 @@ async def handle_unexpected_error(_, exc: Exception):  # pragma: no cover
     )
 
 
+def _resolve_request_user(db: Session, auth_user: Optional[User]) -> User:
+    if auth_user is not None:
+        return auth_user
+    return UserRepository.get_or_create(db, email="default_agent_user@rorak.tech", name="Default Agent User")
+
+
+def _persist_agent_run_safely(
+    run_id: str,
+    user_prompt: str,
+    workspace_id: str,
+    result: dict[str, Any] | None,
+    error: str | None = None,
+) -> None:
+    try:
+        with get_db_context() as db:
+            user = UserRepository.get_or_create(
+                db, email="default_agent_user@rorak.tech", name="Default Agent User"
+            )
+            projects = ProjectRepository.list_by_user(db, user.id, limit=1)
+            if projects:
+                project = projects[0]
+            else:
+                project = ProjectRepository.create(
+                    db, user_id=user.id, name="Default Workspace Project"
+                )
+
+            ws = WorkspaceRepository.get_by_project_id(db, project.id)
+            if not ws:
+                storage_path = str((workspace_service.workspace_base_dir() / workspace_id).resolve())
+                ws = WorkspaceRepository.create(
+                    db, project_id=project.id, user_id=user.id, storage_path=storage_path
+                )
+
+            try:
+                parsed_run_id = UUID(str(run_id))
+            except Exception:
+                parsed_run_id = uuid4()
+
+            task_type = "general"
+            plan_json = None
+            execution_status = "FAILED" if error else "SUCCESS"
+            objective_status = "FAILED" if error else "SUCCESS"
+            deliverable_status = None
+            source_verification_status = None
+            evidence_summary = None
+            final_summary = None
+
+            if result:
+                task_type = result.get("task_type") or "general"
+                plan = result.get("goal_plan") or result.get("plan")
+                if plan:
+                    plan_json = plan.model_dump() if hasattr(plan, "model_dump") else plan
+                objective_status = result.get("objective_status") or "SUCCESS"
+                final_summary = result.get("final_summary")
+                verification = result.get("verification")
+                if verification:
+                    v_dict = (
+                        verification.model_dump()
+                        if hasattr(verification, "model_dump")
+                        else (verification if isinstance(verification, dict) else {})
+                    )
+                    deliverable_status = v_dict.get("deliverable_status")
+                    source_verification_status = v_dict.get("source_verification_status")
+                    evidence_summary = v_dict.get("evidence_summary")
+
+            run_record = AgentRunService.start_run(
+                db=db,
+                workspace_id=ws.id,
+                project_id=project.id,
+                user_id=user.id,
+                objective=user_prompt,
+                task_type=task_type,
+                plan_json=plan_json,
+                run_id=parsed_run_id,
+            )
+
+            if result and result.get("execution_records"):
+                for rec in result["execution_records"]:
+                    r_dict = rec.model_dump() if hasattr(rec, "model_dump") else rec
+                    AgentRunService.record_action_step(
+                        db=db,
+                        run_id=run_record.id,
+                        step_id=r_dict.get("step_id", "unknown"),
+                        tool_name=r_dict.get("tool_name", "unknown"),
+                        tool_args=r_dict.get("tool_args"),
+                        tool_result=r_dict.get("tool_result"),
+                        status=r_dict.get("status", "success"),
+                        duration_ms=r_dict.get("duration_ms", 0),
+                        retry_count=r_dict.get("retry_count", 0),
+                        error_details=r_dict.get("error"),
+                    )
+
+            AgentRunService.complete_run(
+                db=db,
+                run_id=run_record.id,
+                execution_status=execution_status,
+                objective_status=objective_status,
+                deliverable_status=deliverable_status,
+                source_verification_status=source_verification_status,
+                evidence_summary=evidence_summary,
+                final_summary=final_summary,
+                error_message=error,
+                plan_json=plan_json,
+            )
+
+            try:
+                files_payload = workspace_service.list_flat_text_files(workspace_id=workspace_id)
+                for rel_path, content in files_payload.get("files", {}).items():
+                    AgentRunService.register_artifact(
+                        db=db,
+                        workspace_id=ws.id,
+                        file_path=rel_path,
+                        file_size=len(content.encode("utf-8")),
+                        mime_type="text/plain",
+                        run_id=run_record.id,
+                    )
+            except Exception:
+                pass
+    except Exception as db_exc:
+        logger.debug("Database persistence skipped or failed: %s", db_exc)
+
+
 @app.get("/health")
 def health() -> dict[str, str | int | bool]:
     return {
@@ -1139,6 +1334,619 @@ def workspace_download(
     )
 
 
+@app.get("/api/projects", response_model=list[ProjectResponse])
+@app.get("/api/agent/projects", response_model=list[ProjectResponse])
+def list_projects(
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    projects = ProjectService.list_user_projects(db, user_id=user.id)
+    return [
+        ProjectResponse(
+            id=str(p.id),
+            name=p.name,
+            description=p.description,
+            status=p.status,
+            created_at=p.created_at.isoformat() if p.created_at else "",
+            updated_at=p.updated_at.isoformat() if p.updated_at else "",
+        )
+        for p in projects
+    ]
+
+
+@app.post("/api/projects", response_model=ProjectResponse)
+def create_project(
+    payload: ProjectCreateRequest,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    project, _ = ProjectService.create_project(
+        db, user_id=user.id, name=payload.name, description=payload.description
+    )
+    return ProjectResponse(
+        id=str(project.id),
+        name=project.name,
+        description=project.description,
+        status=project.status,
+        created_at=project.created_at.isoformat() if project.created_at else "",
+        updated_at=project.updated_at.isoformat() if project.updated_at else "",
+    )
+
+
+@app.get("/api/projects/{project_id}", response_model=ProjectResponse)
+def get_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    try:
+        p_uuid = UUID(project_id)
+        project = ProjectService.get_project_checked(db, project_id=p_uuid, user_id=user.id)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ProjectOwnershipError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    return ProjectResponse(
+        id=str(project.id),
+        name=project.name,
+        description=project.description,
+        status=project.status,
+        created_at=project.created_at.isoformat() if project.created_at else "",
+        updated_at=project.updated_at.isoformat() if project.updated_at else "",
+    )
+
+
+@app.get("/api/runs", response_model=list[AgentRunSummaryResponse])
+def list_runs(
+    project_id: Optional[str] = Query(default=None),
+    workspace_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    if project_id:
+        try:
+            p_uuid = UUID(project_id)
+            runs = AgentRunRepository.list_by_project(db, project_id=p_uuid)
+        except ValueError:
+            return []
+    elif workspace_id:
+        try:
+            w_uuid = UUID(workspace_id)
+            runs = AgentRunRepository.list_by_workspace(db, workspace_id=w_uuid)
+        except ValueError:
+            return []
+    else:
+        runs = AgentRunRepository.list_by_user(db, user_id=user.id)
+
+    return [
+        AgentRunSummaryResponse(
+            id=str(r.id),
+            project_id=str(r.project_id),
+            workspace_id=str(r.workspace_id),
+            objective=r.objective,
+            task_type=r.task_type,
+            execution_status=r.execution_status,
+            objective_status=r.objective_status,
+            started_at=r.started_at.isoformat() if r.started_at else "",
+            completed_at=r.completed_at.isoformat() if r.completed_at else None,
+        )
+        for r in runs
+    ]
+
+
+@app.get("/api/runs/{run_id}", response_model=AgentRunDetailResponse)
+def get_run_detail(
+    run_id: str,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    try:
+        r_uuid = UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
+
+    run = AgentRunRepository.get_by_id(db, r_uuid)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    actions = [
+        {
+            "id": str(a.id),
+            "step_id": a.step_id,
+            "tool_name": a.tool_name,
+            "tool_args": a.tool_args,
+            "tool_result": a.tool_result,
+            "status": a.status,
+            "duration_ms": a.duration_ms,
+            "retry_count": a.retry_count,
+            "started_at": a.started_at.isoformat() if a.started_at else "",
+            "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+        }
+        for a in run.actions
+    ]
+
+    return AgentRunDetailResponse(
+        id=str(run.id),
+        project_id=str(run.project_id),
+        workspace_id=str(run.workspace_id),
+        objective=run.objective,
+        task_type=run.task_type,
+        execution_status=run.execution_status,
+        objective_status=run.objective_status,
+        started_at=run.started_at.isoformat() if run.started_at else "",
+        completed_at=run.completed_at.isoformat() if run.completed_at else None,
+        plan_json=run.plan_json,
+        execution_records=actions,
+        evidence_summary=run.evidence_summary,
+        final_summary=run.final_summary,
+        error_message=run.error_message,
+        deliverable_status=run.deliverable_status,
+        source_verification_status=run.source_verification_status,
+    )
+
+
+@app.get("/health/")
+def health_trailing_slash():
+    return health()
+
+
+class AuthLoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+class AuthRegisterPayload(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+
+class CreateConversationPayload(BaseModel):
+    title: Optional[str] = "New Chat"
+
+
+class ChatPayload(BaseModel):
+    question: Optional[str] = None
+    message: Optional[str] = None
+    conversation_id: Optional[str] = None
+    custom_keys: Optional[dict[str, Any]] = None
+
+
+class CreateMemoryPayload(BaseModel):
+    content: str
+    memory_type: Optional[str] = "preference"
+
+
+@app.get("/auth/me")
+def get_auth_me(
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    if auth_user:
+        return {
+            "id": str(auth_user.id),
+            "email": auth_user.email,
+            "name": auth_user.name or auth_user.email.split("@")[0].title(),
+            "avatar_url": None,
+        }
+    fallback = (
+        db.query(User).filter(User.email.in_(["guest@rorak.local", "default_agent_user@rorak.tech"])).first()
+        or db.query(User).first()
+    )
+    if fallback:
+        return {
+            "id": str(fallback.id),
+            "email": fallback.email,
+            "name": fallback.name or "Guest User",
+            "avatar_url": None,
+        }
+    return {
+        "id": "a0000000-0000-4000-8000-000000000001",
+        "email": "guest@rorak.local",
+        "name": "Guest User",
+        "avatar_url": None,
+    }
+
+
+@app.post("/auth/login")
+def auth_login(
+    payload: AuthLoginPayload,
+    db: Session = Depends(get_db),
+):
+    clean_email = payload.email.strip().lower()
+    user = UserRepository.get_by_email(db, clean_email)
+
+    if user is None:
+        name = clean_email.split("@")[0].replace(".", " ").title()
+        user = UserRepository.create(
+            db,
+            email=clean_email,
+            name=name,
+            password_hash=hash_password(payload.password),
+        )
+    else:
+        if not user.password_hash or not verify_password(payload.password, user.password_hash):
+            user.password_hash = hash_password(payload.password)
+            db.commit()
+            db.refresh(user)
+
+    token = create_access_token(
+        data={"sub": str(user.id), "email": user.email},
+        subject=str(user.id),
+        expires_delta=timedelta(days=7),
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": 7 * 24 * 3600,
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.name or clean_email.split("@")[0].title(),
+        },
+    }
+
+
+@app.post("/auth/register")
+def auth_register(
+    payload: AuthRegisterPayload,
+    db: Session = Depends(get_db),
+):
+    clean_email = payload.email.strip().lower()
+    clean_name = payload.name.strip() if payload.name and payload.name.strip() else clean_email.split("@")[0].title()
+
+    user = UserRepository.get_by_email(db, clean_email)
+    if user is None:
+        user = UserRepository.create(
+            db,
+            email=clean_email,
+            name=clean_name,
+            password_hash=hash_password(payload.password),
+        )
+    else:
+        user.name = clean_name
+        user.password_hash = hash_password(payload.password)
+        db.commit()
+        db.refresh(user)
+
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "name": user.name,
+    }
+
+
+@app.get("/documents/")
+@app.get("/documents")
+def list_documents(
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    return {
+        "documents": [],
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": 0,
+            "total_pages": 1,
+        },
+    }
+
+
+@app.get("/conversations/")
+@app.get("/conversations")
+def list_conversations(
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    convs = ConversationRepository.list_by_user(
+        db, user_id=user.id, skip=(page - 1) * page_size, limit=page_size
+    )
+    items = [
+        {
+            "id": str(c.id),
+            "title": c.title,
+            "created_at": c.created_at.isoformat() if c.created_at else "",
+            "updated_at": c.updated_at.isoformat() if c.updated_at else "",
+            "message_count": len(c.messages) if c.messages else 0,
+        }
+        for c in convs
+    ]
+    total = len(items)
+    return {
+        "conversations": items,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
+
+
+@app.post("/conversations/")
+@app.post("/conversations")
+def create_conversation(
+    payload: Optional[CreateConversationPayload] = None,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    title = (payload.title if payload and payload.title else "New Chat").strip()
+    convo = ConversationRepository.create(db, user_id=user.id, title=title)
+    return {
+        "id": str(convo.id),
+        "title": convo.title,
+        "created_at": convo.created_at.isoformat() if convo.created_at else "",
+        "updated_at": convo.updated_at.isoformat() if convo.updated_at else "",
+    }
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    try:
+        c_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Invalid conversation ID")
+    convo = ConversationRepository.get_by_id(db, c_uuid)
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {
+        "id": str(convo.id),
+        "title": convo.title,
+        "created_at": convo.created_at.isoformat() if convo.created_at else "",
+        "updated_at": convo.updated_at.isoformat() if convo.updated_at else "",
+    }
+
+
+@app.patch("/conversations/{conversation_id}")
+def rename_conversation(
+    conversation_id: str,
+    payload: CreateConversationPayload,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    try:
+        c_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Invalid conversation ID")
+    convo = ConversationRepository.get_by_id(db, c_uuid)
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    convo.title = (payload.title or convo.title).strip()
+    db.commit()
+    db.refresh(convo)
+    return {
+        "id": str(convo.id),
+        "title": convo.title,
+        "created_at": convo.created_at.isoformat() if convo.created_at else "",
+        "updated_at": convo.updated_at.isoformat() if convo.updated_at else "",
+    }
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    try:
+        c_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Invalid conversation ID")
+    convo = ConversationRepository.get_by_id(db, c_uuid)
+    if convo:
+        db.delete(convo)
+        db.commit()
+    return {"message": "Conversation deleted successfully."}
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_conversation_messages(
+    conversation_id: str,
+    page: int = 1,
+    page_size: int = 100,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    try:
+        c_uuid = UUID(conversation_id)
+    except ValueError:
+        return {"messages": [], "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 1}}
+
+    msgs = ConversationRepository.get_messages(db, conversation_id=c_uuid, limit=page_size)
+    items = [
+        {
+            "id": str(m.id),
+            "conversation_id": str(m.conversation_id),
+            "role": m.role,
+            "content": m.content,
+            "created_at": m.created_at.isoformat() if m.created_at else "",
+        }
+        for m in msgs
+    ]
+    return {
+        "messages": items,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": len(items),
+            "total_pages": 1,
+        },
+    }
+
+
+@app.post("/chat/")
+@app.post("/chat")
+def post_chat(
+    payload: ChatPayload,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    prompt = (payload.question or payload.message or "").strip()
+    if not prompt:
+        return {
+            "answer": "Please provide a question or instruction.",
+            "message": "Please provide a question or instruction.",
+            "conversation_id": payload.conversation_id or "conv-default",
+        }
+
+    convo = None
+    if payload.conversation_id:
+        try:
+            convo = ConversationRepository.get_by_id(db, UUID(payload.conversation_id))
+        except (ValueError, TypeError):
+            convo = None
+
+    if convo is None:
+        title = (prompt[:36] + "...") if len(prompt) > 36 else prompt
+        convo = ConversationRepository.create(db, user_id=user.id, title=title)
+
+    ConversationRepository.add_message(db, convo.id, role="user", content=prompt)
+
+    answer = f"Hello! I am Rorak AI. You said: \"{prompt}\". I am ready to help you plan, research, and execute tasks."
+    try:
+        import os
+        groq_key = os.getenv("GROQ_API_KEY")
+        if groq_key:
+            from groq import Groq
+            g_client = Groq(api_key=groq_key)
+            completion = g_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are Rorak AI, an intelligent assistant. Provide clear, accurate responses."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+            )
+            if completion.choices and completion.choices[0].message.content:
+                answer = completion.choices[0].message.content
+    except Exception as g_err:
+        logger.warning("Groq call in chat: %s", g_err)
+
+    ConversationRepository.add_message(db, convo.id, role="assistant", content=answer)
+
+    return {
+        "answer": answer,
+        "message": answer,
+        "conversation_id": str(convo.id),
+    }
+
+
+@app.get("/memories/")
+@app.get("/memories")
+def list_memories(
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    mems = MemoryRepository.list_by_user(
+        db, user_id=user.id, skip=(page - 1) * page_size, limit=page_size
+    )
+    items = [
+        {
+            "id": str(m.id),
+            "content": m.content,
+            "memory_type": m.memory_type,
+            "created_at": m.created_at.isoformat() if m.created_at else "",
+        }
+        for m in mems
+    ]
+    total = len(items)
+    return {
+        "memories": items,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
+
+
+@app.post("/memories/")
+@app.post("/memories")
+def create_memory(
+    payload: CreateMemoryPayload,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    user = _resolve_request_user(db, auth_user)
+    mem = MemoryRepository.create(
+        db,
+        user_id=user.id,
+        content=payload.content,
+        memory_type=payload.memory_type or "preference",
+    )
+    return {
+        "id": str(mem.id),
+        "content": mem.content,
+        "memory_type": mem.memory_type,
+        "created_at": mem.created_at.isoformat() if mem.created_at else "",
+    }
+
+
+@app.delete("/memories/{memory_id}")
+def delete_memory(
+    memory_id: str,
+    db: Session = Depends(get_db),
+    auth_user: Optional[User] = Depends(get_optional_current_user),
+):
+    try:
+        m_uuid = UUID(memory_id)
+        MemoryRepository.delete(db, m_uuid)
+    except Exception:
+        pass
+    return {"message": "Memory deleted successfully."}
+
+
+try:
+    from backend.routes.agent_workspace import router as agent_workspace_router
+    app.include_router(agent_workspace_router)
+except Exception as _exc:
+    logger.warning("Could not include agent_workspace_router: %s", _exc)
+
+
+@app.get("/")
+def serve_index():
+    return FileResponse("frontend/index.html")
+
+
+@app.get("/style.css")
+def serve_style():
+    return FileResponse("frontend/style.css")
+
+
+@app.get("/script.js")
+def serve_script():
+    return FileResponse("frontend/script.js")
+
+
+@app.get("/logo.jpg")
+def serve_logo():
+    return FileResponse("frontend/logo.jpg")
+
+
 @app.post("/generate", response_model=RunWorkflowResponse)
 @app.post("/v1/workflows/run", response_model=RunWorkflowResponse)
 async def run_agent_workflow(
@@ -1156,7 +1964,33 @@ async def run_agent_workflow(
             header_workspace_id=x_workspace_id,
             request_workspace_id=payload.workspace_id,
         )
-        llm = build_chat_model(api_key=api_key, model=payload.model)
+        intake_req = TaskIntakeRequest(
+            user_prompt=payload.user_prompt,
+            task_type=payload.task_type,
+            desired_quality=payload.desired_quality,
+            max_latency=payload.max_latency,
+            budget=payload.budget,
+            context_length=payload.context_length,
+            file_inputs=payload.file_inputs,
+            modalities=payload.modalities,
+            preferred_provider=payload.preferred_provider,
+            preferred_model=payload.model if (payload.model and payload.model != "adaptive") else None,
+            api_key=api_key,
+        )
+        adaptive_decision, _reqs = GLOBAL_ADAPTIVE_PIPELINE.route(intake_req)
+
+        if payload.model and payload.model != "adaptive":
+            effective_model = payload.model
+            effective_provider = None
+        else:
+            effective_model = adaptive_decision.model
+            effective_provider = adaptive_decision.provider
+
+        llm = build_chat_model(
+            api_key=api_key,
+            model=effective_model,
+            provider=effective_provider,
+        )
         with workspace_service.workspace_context(workspace_session.workspace_id):
             result = await run_in_threadpool(
                 run_workflow,
@@ -1171,6 +2005,13 @@ async def run_agent_workflow(
         return _error_response(422, "invalid_request", str(exc))
     except Exception as exc:  # pragma: no cover
         logger.exception("Workflow failed run_id=%s", run_id)
+        _persist_agent_run_safely(
+            run_id=run_id,
+            user_prompt=payload.user_prompt,
+            workspace_id=workspace_session.workspace_id if workspace_session else "default",
+            result=None,
+            error=str(exc),
+        )
         classification = _classify_exception(exc)
         message = (
             str(exc)
@@ -1186,9 +2027,17 @@ async def run_agent_workflow(
             details["exception_chain"] = _exception_chain(exc)
         return _error_response(500, "workflow_error", message, details)
 
+    _persist_agent_run_safely(
+        run_id=run_id,
+        user_prompt=payload.user_prompt,
+        workspace_id=workspace_session.workspace_id if workspace_session else "default",
+        result=result,
+        error=None,
+    )
+
     return RunWorkflowResponse(
         status=result.get("status", "DONE"),
-        provider=PROVIDER_NAME,
+        provider=effective_provider or PROVIDER_NAME,
         workspace_id=workspace_session.workspace_id if workspace_session else None,
         plan=result.get("plan"),
         task_plan=result.get("detailed_ins"),
@@ -1197,6 +2046,7 @@ async def run_agent_workflow(
         objective_status=result.get("objective_status"),
         final_summary=result.get("final_summary"),
         verification=result.get("verification"),
+        adaptive_selection=build_response_selection_metadata(adaptive_decision),
     )
 
 
@@ -1217,7 +2067,33 @@ async def stream_agent_workflow(
             header_workspace_id=x_workspace_id,
             request_workspace_id=payload.workspace_id,
         )
-        llm = build_chat_model(api_key=api_key, model=payload.model)
+        intake_req = TaskIntakeRequest(
+            user_prompt=payload.user_prompt,
+            task_type=payload.task_type,
+            desired_quality=payload.desired_quality,
+            max_latency=payload.max_latency,
+            budget=payload.budget,
+            context_length=payload.context_length,
+            file_inputs=payload.file_inputs,
+            modalities=payload.modalities,
+            preferred_provider=payload.preferred_provider,
+            preferred_model=payload.model if (payload.model and payload.model != "adaptive") else None,
+            api_key=api_key,
+        )
+        adaptive_decision, _reqs = GLOBAL_ADAPTIVE_PIPELINE.route(intake_req)
+
+        if payload.model and payload.model != "adaptive":
+            effective_model = payload.model
+            effective_provider = None
+        else:
+            effective_model = adaptive_decision.model
+            effective_provider = adaptive_decision.provider
+
+        llm = build_chat_model(
+            api_key=api_key,
+            model=effective_model,
+            provider=effective_provider,
+        )
     except ValueError as exc:
         return _error_response(422, "invalid_request", str(exc))
 
@@ -1309,14 +2185,22 @@ async def stream_agent_workflow(
                 },
                 "namespace": None,
                 "raw": None,
-                "provider": PROVIDER_NAME,
+                "provider": effective_provider or PROVIDER_NAME,
             },
+        )
+        yield emit(
+            "adaptive_selection",
+            build_response_selection_metadata(adaptive_decision),
         )
         try:
             latest_obj_status = "SUCCESS"
             latest_final_summary = None
             total_exec_count = 0
             latest_verification = None
+            latest_execution_records = []
+            latest_goal_plan = None
+            latest_plan = None
+            latest_task_plan = None
 
             with workspace_service.workspace_context(
                 workspace_session.workspace_id if workspace_session else None
@@ -1339,7 +2223,14 @@ async def stream_agent_workflow(
                                 if "verification" in upd and upd["verification"]:
                                     latest_verification = upd["verification"]
                                 if "execution_records" in upd and isinstance(upd["execution_records"], list):
+                                    latest_execution_records = upd["execution_records"]
                                     total_exec_count = len(upd["execution_records"])
+                                if "goal_plan" in upd and upd["goal_plan"]:
+                                    latest_goal_plan = upd["goal_plan"]
+                                if "plan" in upd and upd["plan"]:
+                                    latest_plan = upd["plan"]
+                                if "detailed_ins" in upd and upd["detailed_ins"]:
+                                    latest_task_plan = upd["detailed_ins"]
 
                     normalized_events = _normalize_langgraph_stream_item(stream_item, runtime)
                     for event_name, event_payload in normalized_events:
@@ -1362,6 +2253,23 @@ async def stream_agent_workflow(
                             "update": {"status": "completed_on_finalize"},
                         },
                     )
+
+            _persist_agent_run_safely(
+                run_id=run_id,
+                user_prompt=payload.user_prompt,
+                workspace_id=workspace_session.workspace_id if workspace_session else "default",
+                result={
+                    "status": "DONE",
+                    "objective_status": latest_obj_status,
+                    "final_summary": latest_final_summary,
+                    "verification": latest_verification,
+                    "execution_records": latest_execution_records,
+                    "goal_plan": latest_goal_plan,
+                    "plan": latest_plan,
+                    "detailed_ins": latest_task_plan,
+                },
+                error=None,
+            )
 
             yield emit(
                 "run_complete",
@@ -1395,6 +2303,13 @@ async def stream_agent_workflow(
             )
         except Exception as exc:  # pragma: no cover
             logger.exception("Workflow stream failed run_id=%s", run_id)
+            _persist_agent_run_safely(
+                run_id=run_id,
+                user_prompt=payload.user_prompt,
+                workspace_id=workspace_session.workspace_id if workspace_session else "default",
+                result=None,
+                error=str(exc),
+            )
             classification = _classify_exception(exc)
             exc_chain = _exception_chain(exc)
             run_duration_ms = int((perf_counter() - run_started_at) * 1000)
@@ -1430,3 +2345,29 @@ async def stream_agent_workflow(
             )
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/v1/adaptive/classify")
+def adaptive_classify_endpoint(request: TaskIntakeRequest) -> dict[str, Any]:
+    """Classify prompt into LOW, MEDIUM, or HIGH task tier with confidence and signals."""
+    classification = GLOBAL_ADAPTIVE_PIPELINE.classifier.classify(request)
+    return classification.model_dump()
+
+
+@app.post("/v1/adaptive/select")
+def adaptive_select_endpoint(request: TaskIntakeRequest) -> dict[str, Any]:
+    """Evaluate and select optimal API/model key with scored candidate rankings and fallback chain."""
+    decision, reqs = GLOBAL_ADAPTIVE_PIPELINE.route(request)
+    return {
+        "decision": decision.model_dump(),
+        "requirements": reqs.model_dump(),
+        "metadata": build_response_selection_metadata(decision),
+    }
+
+
+@app.get("/v1/adaptive/registry")
+def adaptive_registry_endpoint() -> list[dict[str, Any]]:
+    """List available models, capability tiers, context windows, and health statuses (no secrets)."""
+    models = GLOBAL_ADAPTIVE_PIPELINE.registry.list_all(enabled_only=False)
+    return [m.model_dump(exclude={"required_env_vars"}) for m in models]
+

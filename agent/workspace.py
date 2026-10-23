@@ -14,6 +14,7 @@ import tempfile
 import threading
 from uuid import uuid4
 import zipfile
+from agent.source_serializer import clean_transport_escapes
 
 MAX_EDITABLE_FILE_CHARS = 400_000
 SESSION_TTL_SECONDS = 60 * 60
@@ -343,15 +344,16 @@ def read_text_file(path: str, workspace_id: str | None = None) -> str:
 
 
 def write_text_file(path: str, content: str, workspace_id: str | None = None) -> str:
-    if len(content) > MAX_EDITABLE_FILE_CHARS:
+    cleaned = clean_transport_escapes(content, file_path=path)
+    if len(cleaned) > MAX_EDITABLE_FILE_CHARS:
         raise WorkspaceValidationError(
-            f"content exceeds {MAX_EDITABLE_FILE_CHARS} characters. Current length: {len(content)}"
+            f"content exceeds {MAX_EDITABLE_FILE_CHARS} characters. Current length: {len(cleaned)}"
         )
 
     root = workspace_root(workspace_id)
     target = resolve_workspace_path(path, workspace_id=workspace_id)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    target.write_text(cleaned, encoding="utf-8")
     return _relative_path(target, root)
 
 

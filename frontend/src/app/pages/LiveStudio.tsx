@@ -18,6 +18,7 @@ import {
   Menu,
 } from "lucide-react";
 import type { NodeId, PromptNodeSchema, WorkspaceTreeNode } from "@/app/lib/api-client";
+import { ActivityFeed } from "@/app/components/ActivityFeed";
 import {
   buildLockedPromptHeader,
   composePromptEditorValue,
@@ -1698,104 +1699,30 @@ export function LiveStudio() {
                 )}
               </div>
 
-              {/* Logs */}
+              {/* Activity Feed */}
               <div id="agent-logs" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
                 <div className="pane-head">
-                  <span className="label">Stream</span>
-                  {logs.length > 0 && (
-                    <span className="num" style={{ marginLeft: "auto", fontSize: "var(--t-micro)", color: "var(--ink-4)" }}>
-                      {logs.length}
+                  <span className="label">Activity</span>
+                  {isRunning && (
+                    <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+                      <span className="dot breathe" style={{ background: "var(--accent)" }} />
+                      <span className="label" style={{ color: "var(--accent)" }}>
+                        Live
+                      </span>
                     </span>
                   )}
                 </div>
 
-                <div
-                  ref={logsContainerRef}
-                  onScroll={handleLogsScroll}
-                  style={{ flex: 1, overflowY: "auto", padding: "4px 0 12px", minHeight: 0 }}
-                >
-                  {logs.length === 0 && (
-                    <p className="meta" style={{ padding: "16px 12px", color: "var(--ink-4)", lineHeight: 1.7 }}>
-                      Nothing yet. Node transitions, iteration counts, durations and errors land
-                      here as the run streams.
-                    </p>
-                  )}
-
-                  {logs.map((log) => {
-                    const severity = toSeverity(log.severity);
-                    const detailText = formatLogDetails(log.details);
-                    const metaParts = [
-                      typeof log.iteration === "number" ? `iter ${log.iteration}` : null,
-                      typeof log.duration_ms === "number" ? `${log.duration_ms}ms` : null,
-                      log.error_type ? log.error_type : null,
-                    ].filter(Boolean) as string[];
-
-                    return (
-                      <motion.div
-                        key={log.id}
-                        className="logrow"
-                        data-sev={severity}
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-                      >
-                        <span className="num" style={{ fontSize: "var(--t-micro)", color: "var(--ink-4)" }}>
-                          {formatLogTime(log.timestamp)}
-                        </span>
-                        <div style={{ minWidth: 0 }}>
-                          <span
-                            className="num"
-                            style={{ fontSize: "var(--t-micro)", color: "var(--ink-4)", marginRight: 7 }}
-                          >
-                            {log.node ?? "system"}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: "var(--t-small)",
-                              lineHeight: 1.55,
-                              color: SEVERITY_COLOR[severity],
-                              wordBreak: "break-word",
-                            }}
-                          >
-                            {log.message}
-                          </span>
-                          {metaParts.length > 0 && (
-                            <div className="num" style={{ fontSize: "var(--t-micro)", color: "var(--ink-4)", marginTop: 2 }}>
-                              {metaParts.join("  ")}
-                            </div>
-                          )}
-                          {detailText && (
-                            <div
-                              className="num"
-                              style={{
-                                fontSize: "var(--t-micro)",
-                                color: "var(--ink-4)",
-                                marginTop: 2,
-                                wordBreak: "break-word",
-                              }}
-                            >
-                              {detailText}
-                            </div>
-                          )}
-                          {log.hint && (
-                            <div className="num" style={{ fontSize: "var(--t-micro)", color: "var(--warn)", marginTop: 2 }}>
-                              {log.hint}
-                            </div>
-                          )}
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-
-                  {errorMessage && (
-                    <div className="notice notice--bad" style={{ margin: "8px 10px" }}>
-                      <div className="notice__body">
-                        <div className="notice__title">Error</div>
-                        <p className="notice__text">{errorMessage}</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <ActivityFeed
+                  logs={logs}
+                  executionRecords={executionRecords}
+                  executionPlan={executionPlan}
+                  verification={verification}
+                  objectiveStatus={objectiveStatus}
+                  isGenerating={isRunning}
+                  activeNodeId={activeNodeId}
+                  errorMessage={errorMessage}
+                />
               </div>
             </div>
           )}

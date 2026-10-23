@@ -29,6 +29,7 @@ try:
         read_text_file,
         write_text_file,
     )
+    from .source_serializer import clean_transport_escapes, validate_source_code
 except ImportError:  # pragma: no cover
     from workspace import (
         WorkspaceBinaryFileError,
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover
         read_text_file,
         write_text_file,
     )
+    from source_serializer import clean_transport_escapes, validate_source_code
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,10 @@ class ReadFileInput(BaseModel):
 
 class ListFilesInput(BaseModel):
     directory: str = Field(default=".", description="Relative directory path to list (default: root).")
+
+
+class WikipediaSummaryInput(BaseModel):
+    title: str = Field(..., min_length=1, max_length=300, description="Article title or topic to look up on Wikipedia.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -448,12 +454,16 @@ def execute_get_github_repo_metadata(repo: str) -> dict[str, Any]:
 
 
 def execute_write_file(path: str, content: str) -> dict[str, Any]:
-    """Write text file inside the active session workspace."""
+    """Write text file inside the active session workspace and validate saved content."""
     relative_path = write_text_file(path, content)
+    saved_content = read_text_file(path)
+    issues = validate_source_code(path, saved_content)
     return {
         "path": relative_path,
-        "bytes_written": len(content.encode("utf-8")),
-        "message": f"Successfully wrote {len(content)} characters to '{relative_path}'.",
+        "bytes_written": len(saved_content.encode("utf-8")),
+        "message": f"Successfully wrote {len(saved_content)} characters to '{relative_path}'.",
+        "validation_issues": issues,
+        "valid": len(issues) == 0,
     }
 
 
@@ -504,6 +514,23 @@ def execute_list_files(directory: Optional[str] = None, path: Optional[str] = No
             "files": [],
             "error": str(exc),
         }
+
+
+
+def execute_wikipedia_summary(title: str) -> dict:
+    """Retrieve a structured article summary from the Wikipedia REST API.
+
+    Delegates to :func:`agent.search.search_wikipedia_summary` which handles
+    URL encoding, timeouts, rate limiting, and error responses.
+    """
+    clean_title = title.strip()
+    if not clean_title:
+        raise ValueError("title must not be empty.")
+    try:
+        from .search import search_wikipedia_summary
+    except ImportError:  # pragma: no cover
+        from search import search_wikipedia_summary
+    return search_wikipedia_summary(clean_title)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -637,6 +664,19 @@ class ToolRegistry:
                 schema=ReadFileInput,
                 restrictions="Restricted to the active session workspace. Binary files are rejected.",
                 handler=execute_read_file,
+            )
+        )
+        self.register(
+            ToolDefinition(
+                name="wikipedia_summary",
+                description=(
+                    "Fetch a structured article summary from the Wikipedia REST API for a known topic or title. "
+                    "Returns title, description, extract, canonical page URL, and thumbnail. "
+                    "Use for concise topic overviews — not for general web search."
+                ),
+                schema=WikipediaSummaryInput,
+                restrictions="Read-only public Wikipedia REST API. English Wikipedia only.",
+                handler=execute_wikipedia_summary,
             )
         )
         self.register(

@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 from .state import ActionExecutionRecord, GoalPlan, SourceEvidence, VerificationResult
 from .workspace import read_text_file
+from .source_serializer import validate_source_code
+from .calculator_tester import test_calculator_functionality
 
 
 def extract_markdown_links(text: str) -> list[tuple[str, str]]:
@@ -89,10 +91,23 @@ def has_unresolved_placeholders(text: str) -> list[str]:
     if comment_placeholders:
         findings.extend([c.strip() for c in comment_placeholders[:5]])
 
-    # 9. Entire file is just a short comment or contains bare placeholder indicator
+    # 9. Entire file is just comments or bare placeholder indicator with no actual code
     stripped = text.strip()
-    if re.search(r"^\s*(/\*[\s\S]*?\*/|<!--[\s\S]*?-->|//.*|#.*)\s*$", stripped):
-        if any(w in stripped.lower() for w in ("placeholder", "todo", "css", "html", "style", "script", "code")):
+    is_markdown = stripped.startswith(("# ", "## ", "### ")) or "\n# " in stripped
+    if is_markdown:
+        no_comments = re.sub(r"<!--[\s\S]*?-->", "", stripped).strip()
+    else:
+        no_comments = re.sub(r"/\*[\s\S]*?\*/|<!--[\s\S]*?-->|//.*", "", stripped).strip()
+
+    if not no_comments and stripped:
+        stub_indicators = (
+            "placeholder", "todo", "to-do", "to be implemented",
+            "add style", "add css", "add content", "coming soon",
+            "insert code", "code goes here", "stub"
+        )
+        if any(w in stripped.lower() for w in stub_indicators):
+            findings.append(stripped[:80])
+        elif len(stripped) < 80:
             findings.append(stripped[:80])
 
     return findings
@@ -109,6 +124,12 @@ def validate_software_deliverable(file_path: str, content: str, all_files: dict[
     if placeholders:
         issues.append(f"Contains placeholder or stub content: '{placeholders[0]}'")
 
+    # Syntax and transport-escape validation (detects literal \n, \", unstyled CSS, syntax defects)
+    serializer_issues = validate_source_code(file_path, content)
+    for s_iss in serializer_issues:
+        if s_iss not in issues:
+            issues.append(s_iss)
+
     # CSS validation
     if lower_path.endswith(".css"):
         rules = re.findall(r"[^{}]+\{[^{}]+\}", content)
@@ -116,6 +137,8 @@ def validate_software_deliverable(file_path: str, content: str, all_files: dict[
             issues.append(f"CSS file '{file_path}' has insufficient styling rules ({len(rules)} rule(s) found). Must provide a complete stylesheet.")
         if "/*" in content and "*/" in content and len(rules) == 0:
             issues.append(f"CSS file '{file_path}' contains only comments without active CSS rules.")
+        if content.count("{") != content.count("}"):
+            issues.append(f"CSS file '{file_path}' has unbalanced curly braces ({content.count('{')} open vs {content.count('}')} close).")
 
     # HTML validation
     elif lower_path.endswith((".html", ".htm")):
@@ -134,6 +157,11 @@ def validate_software_deliverable(file_path: str, content: str, all_files: dict[
                 if not found:
                     issues.append(f"HTML references stylesheet '{link_target}' which was not found in workspace.")
 
+        # Ensure HTML links to workspace CSS if one exists
+        workspace_css = [k for k in all_files.keys() if k.endswith(".css")]
+        if workspace_css and not css_links:
+            issues.append(f"HTML deliverable does not link to stylesheet '{workspace_css[0]}' present in workspace.")
+
         # Cross-reference check: verify scripts linked in HTML actually exist
         js_links = re.findall(r'<script[^>]+src=["\']([^"\']+\.js)["\']', content, re.IGNORECASE)
         for link_target in js_links:
@@ -143,10 +171,19 @@ def validate_software_deliverable(file_path: str, content: str, all_files: dict[
                 if not found:
                     issues.append(f"HTML references script '{link_target}' which was not found in workspace.")
 
+        # Ensure HTML links to workspace JS if one exists (unless inline script is present)
+        workspace_js = [k for k in all_files.keys() if k.endswith(".js")]
+        if workspace_js and not js_links and "<script" not in content.lower():
+            issues.append(f"HTML deliverable does not reference script '{workspace_js[0]}' present in workspace.")
+
     # JS validation
     elif lower_path.endswith(".js"):
         if len(stripped) < 30:
             issues.append(f"JavaScript file '{file_path}' is too brief (<30 chars).")
+        if content.count("{") != content.count("}"):
+            issues.append(f"JavaScript file '{file_path}' has unbalanced curly braces ({content.count('{')} open vs {content.count('}')} close).")
+        if content.count("(") != content.count(")"):
+            issues.append(f"JavaScript file '{file_path}' has unbalanced parentheses ({content.count('(')} open vs {content.count(')')} close).")
 
     # Python validation
     elif lower_path.endswith(".py"):
@@ -233,6 +270,26 @@ class FactualVerifier:
                     self.source_evidence.append(se)
                     existing_urls.add(normalize_url(u))
 
+            elif tool_name == "wikipedia_summary" and isinstance(result_data, dict):
+                # Only record source evidence when the article was actually found.
+                if result_data.get("found"):
+                    u = result_data.get("url", "")
+                    if u and normalize_url(u) not in existing_urls:
+                        se = SourceEvidence(
+                            url=u,
+                            title=f"Wikipedia: {result_data.get('title', '')}",
+                            status="retrieved",
+                            observation_date=result_data.get("observed_at", "")[:10] or "unknown",
+                            relevant_excerpt=result_data.get("extract", "")[:500],
+                            claim_topics=[
+                                "wikipedia",
+                                result_data.get("title", "").lower(),
+                            ],
+                            is_official_source=False,
+                        )
+                        self.source_evidence.append(se)
+                        existing_urls.add(normalize_url(u))
+
     def evaluate(self) -> VerificationResult:
         criteria_evaluated: list[str] = []
         unverified_claims: list[str] = []
@@ -311,9 +368,43 @@ class FactualVerifier:
                     f"Deliverable verified: '{target_path}' exists and is complete ({len(content)} chars)."
                 )
 
-        # 3. Factual & Source Verification (for research deliverables)
-        source_verification_status = "SUCCESS"
+        # 3. Functional and source verification
         is_research = self.goal_plan.task_type == "research" or any("research" in s.title.lower() for s in self.goal_plan.steps)
+        is_calculator = "calculator" in self.goal_plan.objective.lower() or any("calculator" in s.title.lower() for s in self.goal_plan.steps)
+        functional_verification_status: Optional[str] = None
+
+        if is_calculator and file_contents:
+            html_candidate = next((c for p, c in file_contents.items() if p.lower().endswith((".html", ".htm"))), "")
+            calc_ok, calc_logs = test_calculator_functionality(
+                workspace_dir=None,
+                html_content=html_candidate,
+                all_files=file_contents,
+            )
+            if calc_ok:
+                functional_verification_status = "SUCCESS"
+                criteria_evaluated.append("Functional calculator testing passed: arithmetic operations, decimal calculations, clear, backspace, and zero runtime errors verified.")
+                for log_item in calc_logs:
+                    criteria_evaluated.append(f"Calculator check: {log_item}")
+            else:
+                functional_verification_status = "FAILED"
+                deliverable_status = "FAILED"
+                for log_item in calc_logs:
+                    unverified_claims.append(f"Calculator defect: {log_item}")
+                    criteria_evaluated.append(f"Calculator test failure: {log_item}")
+        elif not is_research and file_contents:
+            if deliverable_status == "SUCCESS" and len(unverified_claims) == 0:
+                functional_verification_status = "SUCCESS"
+            elif deliverable_status == "PARTIAL_SUCCESS":
+                functional_verification_status = "PARTIAL_SUCCESS"
+            else:
+                functional_verification_status = "FAILED"
+
+        # Source / citation verification (for research) or functional coherence (for software)
+        source_verification_status = "SUCCESS"
+        if not is_research:
+            # Software tasks: verification badge and status must reflect functional and deliverable results
+            # Never report SUCCESS if deliverable or functional checks failed!
+            source_verification_status = functional_verification_status or deliverable_status
 
         if is_research and file_contents:
             for file_path, content in file_contents.items():
@@ -394,14 +485,15 @@ class FactualVerifier:
             execution_status == "SUCCESS"
             and deliverable_status == "SUCCESS"
             and source_verification_status == "SUCCESS"
+            and functional_verification_status in ("SUCCESS", None)
             and len(unverified_claims) == 0
         ):
             overall_objective_status = "SUCCESS"
             evidence_summary = (
                 f"Objective successfully achieved: all {total_steps} planned actions completed "
-                f"with verified evidence and workspace deliverables ({len(verified_sources_set)} verified sources)."
+                f"with verified deliverables and passing acceptance checks."
             )
-        elif execution_status in ("SUCCESS", "PARTIAL_SUCCESS") and deliverable_status in ("SUCCESS", "PARTIAL_SUCCESS"):
+        elif execution_status in ("SUCCESS", "PARTIAL_SUCCESS") and deliverable_status in ("SUCCESS", "PARTIAL_SUCCESS") and functional_verification_status != "FAILED":
             overall_objective_status = "PARTIAL_SUCCESS"
             evidence_summary = (
                 f"Objective partially satisfied: Deliverables produced with {len(unverified_claims)} unverified claims "
@@ -410,7 +502,7 @@ class FactualVerifier:
         else:
             overall_objective_status = "FAILED"
             evidence_summary = (
-                f"Objective failed: Critical execution failures or missing primary deliverables."
+                f"Objective failed: Execution failure, deliverable defects, or failed acceptance checks."
             )
 
         return VerificationResult(
@@ -418,9 +510,13 @@ class FactualVerifier:
             execution_status=execution_status,
             deliverable_status=deliverable_status,
             source_verification_status=source_verification_status,
+            functional_verification_status=functional_verification_status,
             criteria_evaluated=criteria_evaluated,
             evidence_summary=evidence_summary,
             unverified_claims=unverified_claims,
             verified_sources=sorted(list(verified_sources_set)),
-            feedback=None if overall_objective_status == "SUCCESS" else "Verify ungrounded claims against official project repositories.",
+            feedback=None if overall_objective_status == "SUCCESS" else (
+                "Fix deliverable defects and failing acceptance checks: " + "; ".join(unverified_claims[:3])
+                if unverified_claims else "Verify deliverables and rerun acceptance checks."
+            ),
         )

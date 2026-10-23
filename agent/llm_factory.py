@@ -62,12 +62,42 @@ def build_chat_model(
         selected_model = (model or "gpt-4o").strip()
         return ChatOpenAI(api_key=key, model=selected_model, temperature=temperature)
 
+    elif norm_provider == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+
+            key = (api_key or os.getenv("ANTHROPIC_API_KEY", "")).strip()
+            if not key:
+                raise ValueError("api_key is required for Anthropic.")
+            selected_model = (model or "claude-3-5-sonnet-20241022").strip()
+            return ChatAnthropic(api_key=key, model=selected_model, temperature=temperature)
+        except ImportError:
+            from langchain_openai import ChatOpenAI
+            key = (api_key or os.getenv("ANTHROPIC_API_KEY", "custom")).strip()
+            return ChatOpenAI(base_url="https://api.anthropic.com/v1", api_key=key, model=model or "claude-3-5-sonnet-20241022", temperature=temperature)
+
+    elif norm_provider in ("google", "gemini"):
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
+            key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")).strip()
+            if not key:
+                raise ValueError("api_key is required for Google / Gemini.")
+            selected_model = (model or "gemini-1.5-pro").strip()
+            return ChatGoogleGenerativeAI(google_api_key=key, model=selected_model, temperature=temperature)
+        except ImportError:
+            from langchain_openai import ChatOpenAI
+            key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "custom")).strip()
+            return ChatOpenAI(base_url="https://generativelanguage.googleapis.com/v1beta/openai/", api_key=key, model=model or "gemini-1.5-pro", temperature=temperature)
+
     elif norm_provider in ("custom", "openai_compatible", "ollama", "openrouter", "deepseek", "local"):
         from langchain_openai import ChatOpenAI
 
-        url = (base_url or "http://localhost:11434/v1").strip()
-        key = (api_key or os.getenv("OPENAI_API_KEY", "custom-key")).strip()
-        selected_model = (model or "default").strip()
+        default_url = "https://api.deepseek.com/v1" if norm_provider == "deepseek" else "http://localhost:11434/v1"
+        url = (base_url or default_url).strip()
+        default_env = "DEEPSEEK_API_KEY" if norm_provider == "deepseek" else "OPENAI_API_KEY"
+        key = (api_key or os.getenv(default_env, "custom-key")).strip()
+        selected_model = (model or ("deepseek-chat" if norm_provider == "deepseek" else "default")).strip()
         return ChatOpenAI(base_url=url, api_key=key, model=selected_model, temperature=temperature)
 
     else:

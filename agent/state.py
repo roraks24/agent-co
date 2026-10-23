@@ -114,6 +114,10 @@ class VerificationResult(BaseModel):
         default="SUCCESS",
         description="Source verification status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
     )
+    functional_verification_status: Optional[str] = Field(
+        default=None,
+        description="Functional verification status: SUCCESS, PARTIAL_SUCCESS, or FAILED."
+    )
     criteria_evaluated: list[str] = Field(
         default_factory=list,
         description="Specific success criteria checked against actual evidence."
