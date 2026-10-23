@@ -110,9 +110,6 @@ export function Layout() {
             <span className="hidden sm:inline-flex">
               <StatusTell />
             </span>
-            <a className="nav-link hidden md:inline" href={REPO_URL} target="_blank" rel="noopener noreferrer">
-              GitHub
-            </a>
             {!isStudio && (
               <span className="hidden md:inline-flex">
                 <NavLink to="/studio" className="btn btn--primary btn--sm">
@@ -163,9 +160,6 @@ export function Layout() {
                 ))}
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBlock: 14 }}>
                   <StatusTell />
-                  <a className="nav-link" href={REPO_URL} target="_blank" rel="noopener noreferrer">
-                    GitHub
-                  </a>
                 </div>
               </div>
             </motion.div>

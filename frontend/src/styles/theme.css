@@ -109,7 +109,6 @@
      colour sampled from the ink rather than neutral black. */
   --lift: 0 1px 2px rgba(27, 26, 24, 0.08), 0 16px 40px -12px rgba(27, 26, 24, 0.24);
 }
-
 /* ── Dark surface: the same two materials, swapped ───────────────────────── */
 .surface-dark {
   --bg:          #1b1a18;
@@ -243,10 +242,3 @@
   *::-webkit-scrollbar-thumb:hover { background: var(--rule-strong); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
-}
