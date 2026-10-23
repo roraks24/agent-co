@@ -1120,9 +1120,9 @@ export function LiveStudio() {
     if (activeNodeId === "coder" && coderFileProgress) {
       const { activeFile, completedFiles, totalFiles } = coderFileProgress;
       if (activeFile !== null) {
-        return `working on file ${activeFile}/${totalFiles} (${completedFiles}/${totalFiles} completed)`;
+        return `working on step ${activeFile}/${totalFiles} (${completedFiles}/${totalFiles} completed)`;
       }
-      return `${completedFiles}/${totalFiles} files completed`;
+      return `${completedFiles}/${totalFiles} steps completed`;
     }
     if (typeof activeIteration === "number") {
       return `iteration ${activeIteration}`;
@@ -1132,8 +1132,8 @@ export function LiveStudio() {
 
   const coderNote =
     coderFileProgress && (activeNodeId === "coder" || nodeStatuses.coder !== "idle")
-      ? `${coderFileProgress.completedFiles}/${coderFileProgress.totalFiles} files${
-          coderFileProgress.activeFile !== null ? ` · on ${coderFileProgress.activeFile}` : ""
+      ? `${coderFileProgress.completedFiles}/${coderFileProgress.totalFiles} steps${
+          coderFileProgress.activeFile !== null ? ` · on step ${coderFileProgress.activeFile}` : ""
         }`
       : null;
 

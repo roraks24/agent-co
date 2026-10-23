@@ -452,6 +452,13 @@ function buildDisplayLogMessage(
     return "Workflow run started.";
   }
   if (eventName === "run_complete") {
+    const objStatus = typeof data.objective_status === "string" ? data.objective_status : null;
+    if (objStatus === "FAILED") {
+      return "Workflow completed: objective FAILED.";
+    }
+    if (objStatus === "PARTIAL_SUCCESS") {
+      return "Workflow completed: objective PARTIAL_SUCCESS.";
+    }
     return "Workflow finished successfully.";
   }
   if (eventName === "on_node_start" && node) {

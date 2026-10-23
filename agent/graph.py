@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import re
 from time import perf_counter
 from typing import Any, AsyncIterator, Callable
 
@@ -174,6 +175,69 @@ def _generate_deliverable_summary(
     return "\n".join(lines)
 
 
+def _parse_llm_json_goal_plan(text: str, user_prompt: str) -> GoalPlan | None:
+    """Parse JSON or markdown-fenced JSON into a structured GoalPlan."""
+    clean = text.strip()
+    match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", clean)
+    if match:
+        clean = match.group(1)
+    else:
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start != -1 and end != -1:
+            clean = clean[start : end + 1]
+
+    import json
+
+    try:
+        data = json.loads(clean)
+    except Exception:
+        return None
+
+    if "GoalPlan" in data and isinstance(data["GoalPlan"], dict):
+        data = data["GoalPlan"]
+
+    obj = data.get("objective") or data.get("goal") or user_prompt
+    task_type = data.get("task_type") or ("research" if "research" in user_prompt.lower() else "general")
+    expected_outcome = data.get("expected_outcome") or str(
+        data.get("success_criteria") or "Completed workflow execution"
+    )
+
+    raw_steps = data.get("steps")
+    if not isinstance(raw_steps, list) or len(raw_steps) == 0:
+        return None
+
+    normalized_steps: list[ActionStep] = []
+    for i, s in enumerate(raw_steps):
+        if isinstance(s, dict):
+            s_id = s.get("id") or f"step-{i+1}"
+            s_title = s.get("title") or s.get("description") or f"Step {i+1}"
+            s_tool = s.get("tool_name") or s.get("tool") or "write_file"
+            s_args = s.get("tool_args") or s.get("args") or {}
+            s_outcome = s.get("expected_outcome") or s.get("description") or ""
+            s_crit = s.get("success_criteria") or ""
+            normalized_steps.append(
+                ActionStep(
+                    id=s_id,
+                    title=s_title,
+                    tool_name=s_tool,
+                    tool_args=s_args,
+                    expected_outcome=s_outcome,
+                    success_criteria=s_crit,
+                )
+            )
+
+    if not normalized_steps:
+        return None
+
+    return GoalPlan(
+        objective=obj,
+        task_type=task_type,
+        expected_outcome=expected_outcome,
+        steps=normalized_steps,
+    )
+
+
 def _planner_agent(
     llm: BaseChatModel,
     event_callback: EventCallback | None,
@@ -192,22 +256,28 @@ def _planner_agent(
 
         # Attempt general-purpose GoalPlan extraction
         try:
-            response = llm.with_structured_output(GoalPlan).invoke(
-                planner_prompt(user_prompt, mutable_layer=mutable_prompt)
-            )
-            if isinstance(response, GoalPlan):
-                goal_plan = response
+            composed_prompt = planner_prompt(user_prompt, mutable_layer=mutable_prompt)
+            llm_result = llm.invoke(composed_prompt)
+            text_candidate = getattr(llm_result, "content", str(llm_result))
+            parsed_gp = _parse_llm_json_goal_plan(text_candidate, user_prompt)
+            if parsed_gp:
+                goal_plan = parsed_gp
                 plan = _legacy_plan_from_goal_plan(goal_plan)
-            elif isinstance(response, Plan):
-                plan = response
-                goal_plan = _goal_plan_from_legacy_plan(plan)
-            elif isinstance(response, dict):
-                if "steps" in response:
-                    goal_plan = GoalPlan(**response)
+            else:
+                response = llm.with_structured_output(GoalPlan).invoke(composed_prompt)
+                if isinstance(response, GoalPlan):
+                    goal_plan = response
                     plan = _legacy_plan_from_goal_plan(goal_plan)
-                elif "files" in response:
-                    plan = Plan(**response)
+                elif isinstance(response, Plan):
+                    plan = response
                     goal_plan = _goal_plan_from_legacy_plan(plan)
+                elif isinstance(response, dict):
+                    if "steps" in response:
+                        goal_plan = GoalPlan(**response)
+                        plan = _legacy_plan_from_goal_plan(goal_plan)
+                    elif "files" in response:
+                        plan = Plan(**response)
+                        goal_plan = _goal_plan_from_legacy_plan(plan)
         except Exception as exc:
             logger.warning("GoalPlan extraction fell back to legacy Plan: %s", exc)
             response = llm.with_structured_output(Plan).invoke(
@@ -414,8 +484,9 @@ def _coder_agent(
                 path = tool_args.get("path", f"output_{current_step_idx+1}.md")
                 content = tool_args.get("content", "")
 
-                # If content is empty, synthesize using LLM and accumulated evidence
-                if not content or len(content.strip()) < 10:
+                # If content is empty or contains unresolved placeholders, synthesize using LLM and accumulated evidence
+                is_unresolved = bool(re.search(r"(\{\{[^}]+\}\}|\*+To be filled[^*]*\*+|\[Insert\s+[^\]]+\]|\{\s*step-\d+[^}]*\})", content, re.IGNORECASE))
+                if not content or len(content.strip()) < 10 or is_unresolved:
                     evidence_snippets: list[str] = []
                     for r in execution_records:
                         if r.status == "success" and r.tool_result:

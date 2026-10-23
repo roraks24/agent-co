@@ -361,11 +361,11 @@ def _summarize_update(node: str, update: object) -> dict[str, Any]:
         active_step = min(completed_steps + 1, int(summary["total_steps"]))
         summary["completed_steps"] = completed_steps
         summary["active_step"] = active_step
-        text = f"file {active_step}/{summary['total_steps']} ({completed_steps} completed)"
+        text = f"step {active_step}/{summary['total_steps']} ({completed_steps} completed)"
     elif "total_steps" in summary:
-        text = f"total files={summary['total_steps']}"
+        text = f"total steps={summary['total_steps']}"
     elif "planned_files" in summary:
-        text = f"planned files={summary['planned_files']}"
+        text = f"planned steps={summary['planned_files']}"
     elif "current_step_idx" in summary:
         text = f"step index now {summary['current_step_idx']}"
     elif "keys" in summary:
@@ -1371,7 +1371,15 @@ async def stream_agent_workflow(
                     "activity_score": 0.0,
                     "phase": "system",
                     "severity": "info" if latest_obj_status == "SUCCESS" else ("warn" if latest_obj_status == "PARTIAL_SUCCESS" else "error"),
-                    "message": "Workflow finished successfully.",
+                    "message": (
+                        "Workflow finished successfully."
+                        if latest_obj_status == "SUCCESS"
+                        else (
+                            f"Workflow completed: objective {latest_obj_status}."
+                            if latest_obj_status
+                            else "Workflow finished."
+                        )
+                    ),
                     "details": {
                         "run_duration_ms": int((perf_counter() - run_started_at) * 1000),
                         "objective_status": latest_obj_status,

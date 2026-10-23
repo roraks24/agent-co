@@ -418,6 +418,111 @@ class Phase11VerificationRegressionTests(unittest.TestCase):
             self.assertEqual(res.execution_status, "SUCCESS")
             self.assertEqual(res.deliverable_status, "SUCCESS")
 
+    def test_11_unresolved_template_placeholders_fail_verification(self) -> None:
+        """Test that files containing {{step-1.output}} or *To be filled* fail deliverable and objective verification."""
+        with workspace_context("test-p11-11"):
+            write_text_file(
+                "report.md",
+                "# Comparison Report\n"
+                "## Executive Summary\nSummary\n"
+                "## Comparison Table\n"
+                "| Framework | Stars | License |\n"
+                "|---|---|---|\n"
+                "| LangGraph | {{step-1.output.stargazers_count}} | {{step-2.output.license.spdx_id}} |\n"
+                "## Architecture Analysis\n"
+                "*To be filled from search results*\n"
+                "Source: [LangGraph](https://github.com/langchain-ai/langgraph)\n",
+            )
+            records = [
+                ActionExecutionRecord(
+                    step_id="step-1",
+                    tool_name="get_github_repo_metadata",
+                    tool_args={"repo": "langchain-ai/langgraph"},
+                    started_at="2026-10-23T10:00:00Z",
+                    completed_at="2026-10-23T10:00:01Z",
+                    duration_ms=100,
+                    status="success",
+                    tool_result={
+                        "repo": "langchain-ai/langgraph",
+                        "repo_url": "https://github.com/langchain-ai/langgraph",
+                        "stars": 43776,
+                        "license_spdx": "MIT",
+                    },
+                ),
+                ActionExecutionRecord(
+                    step_id="step-2",
+                    tool_name="write_file",
+                    tool_args={"path": "report.md"},
+                    started_at="2026-10-23T10:00:01Z",
+                    completed_at="2026-10-23T10:00:02Z",
+                    duration_ms=100,
+                    status="success",
+                    tool_result={"path": "report.md"},
+                ),
+            ]
+            verifier = FactualVerifier(self.research_plan, records)
+            res = verifier.evaluate()
+            self.assertEqual(res.deliverable_status, "FAILED")
+            self.assertEqual(res.objective_status, "FAILED")
+            self.assertTrue(any("Unresolved template placeholder" in claim for claim in res.unverified_claims))
+            self.assertTrue(any("contains" in c and "unresolved template placeholders" in c for c in res.criteria_evaluated))
+
+    def test_12_placeholder_detected_forces_evidence_synthesis(self) -> None:
+        """Test that coder node detects placeholders in tool_args and forces evidence synthesis."""
+        from agent.graph import _coder_agent
+
+        with workspace_context("test-p11-12"):
+            mock_llm = MagicMock()
+            mock_response = MagicMock()
+            mock_response.content = (
+                "# Synthesized Report\n"
+                "## Executive Summary\nReal synthesized analysis.\n"
+                "## Comparison Table\n| Tool | Stars |\n|---|---|\n| LangGraph | 43,776 |\n"
+                "## Architecture Analysis\nOfficial source details.\n"
+                "Source: [LangGraph](https://github.com/langchain-ai/langgraph)\n"
+            )
+            mock_llm.invoke.return_value = mock_response
+
+            step = ActionStep(
+                id="step-2",
+                title="Write Report",
+                tool_name="write_file",
+                tool_args={
+                    "path": "report.md",
+                    "content": "# Template\nStars: {{step-1.output.stargazers_count}}\n*To be filled from search results*",
+                },
+            )
+            goal_plan = GoalPlan(
+                objective="Synthesize research",
+                task_type="research",
+                expected_outcome="Report",
+                steps=[step],
+            )
+            prior_record = ActionExecutionRecord(
+                step_id="step-1",
+                tool_name="get_github_repo_metadata",
+                tool_args={"repo": "langchain-ai/langgraph"},
+                started_at="2026-10-23T10:00:00Z",
+                completed_at="2026-10-23T10:00:01Z",
+                duration_ms=100,
+                status="success",
+                tool_result={"repo": "langchain-ai/langgraph", "stars": 43776, "repo_url": "https://github.com/langchain-ai/langgraph"},
+            )
+            state = {
+                "goal_plan": goal_plan,
+                "current_step_idx": 0,
+                "execution_records": [prior_record],
+            }
+
+            coder = _coder_agent(mock_llm, event_callback=None)
+            next_state = coder(state)
+
+            written_content = read_text_file("report.md")
+            self.assertNotIn("{{step-1", written_content)
+            self.assertNotIn("*To be filled", written_content)
+            self.assertIn("Synthesized Report", written_content)
+            self.assertEqual(next_state["current_step_idx"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

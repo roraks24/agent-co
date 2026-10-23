@@ -44,6 +44,30 @@ def normalize_url(url: str) -> str:
     return f"{scheme}://{netloc}{path}"
 
 
+def has_unresolved_placeholders(text: str) -> list[str]:
+    """Detect unresolved template placeholders or unfilled markers in deliverable text."""
+    if not text:
+        return []
+    findings = []
+    # 1. {{...}} template tags
+    braced = re.findall(r"\{\{[^}]+\}\}", text)
+    if braced:
+        findings.extend(braced[:5])
+    # 2. *To be filled...* markers
+    unfilled = re.findall(r"\*+To be filled[^*]*\*+", text, re.IGNORECASE)
+    if unfilled:
+        findings.extend(unfilled[:5])
+    # 3. [Insert ...] or <Insert ...>
+    inserts = re.findall(r"(\[Insert\s+[^\]]+\]|<Insert\s+[^>]+>)", text, re.IGNORECASE)
+    if inserts:
+        findings.extend(inserts[:5])
+    # 4. {step-N.output...}
+    step_tags = re.findall(r"\{\s*step-\d+[^}]*\}", text, re.IGNORECASE)
+    if step_tags:
+        findings.extend(step_tags[:5])
+    return findings
+
+
 class FactualVerifier:
     """Validates research claims, sources, and metrics against collected execution evidence."""
 
@@ -151,10 +175,22 @@ class FactualVerifier:
             try:
                 content = read_text_file(target_path)
                 file_contents[target_path] = content
+
+                # Reject any deliverable containing unresolved template placeholders
+                placeholder_findings = has_unresolved_placeholders(content)
+                if placeholder_findings:
+                    deliverable_status = "FAILED"
+                    source_verification_status = "FAILED"
+                    for pf in placeholder_findings:
+                        unverified_claims.append(f"Unresolved template placeholder: '{pf}'")
+                    criteria_evaluated.append(
+                        f"Deliverable rejected: '{target_path}' contains {len(placeholder_findings)} unresolved template placeholders."
+                    )
+
                 if len(content.strip()) < 10:
                     deliverable_status = "FAILED"
                     criteria_evaluated.append(f"Deliverable warning: '{target_path}' is too brief (<10 chars).")
-                else:
+                elif not placeholder_findings:
                     criteria_evaluated.append(
                         f"Deliverable verified: '{target_path}' exists ({len(content)} chars)."
                     )
