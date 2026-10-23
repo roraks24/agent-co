@@ -135,3 +135,8 @@ def coder_system_prompt(mutable_layer: str | None = None) -> str:
         mutable_layer,
         "Execution Mode: Execute action step with registered tools and record verified evidence.",
     )
+
+
+def resolve_node_prompt(node_id: str, mutable_layer: str | None = None) -> str:
+    return get_composed_prompt(node_id, mutable_layer, "")
+

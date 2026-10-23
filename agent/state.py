@@ -159,11 +159,21 @@ class ImplementationStep(BaseModel):
     task_description: str = Field(description="Single-string task details for this file.")
 
 
+class TaskStep(BaseModel):
+    id: int = 1
+    file_path: str = ""
+    description: str = ""
+    task_description: str = ""
+    model_config = ConfigDict(extra="allow")
+
+
 class TaskPlan(BaseModel):
-    implementation_steps: list[ImplementationStep] = Field(
+    implementation_steps: list[Any] = Field(
+        default_factory=list,
         description="Ordered implementation steps, one per file."
     )
     model_config = ConfigDict(extra="allow")
+
 
 
 class CoderState(BaseModel):

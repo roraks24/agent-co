@@ -14,7 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
-from .prompts import resolve_node_prompt
+from .prompts import resolve_mutable_for_node, resolve_node_prompt
 from .state import (
     ActionExecutionRecord,
     ActionStep,
@@ -38,6 +38,7 @@ EventCallback = Callable[[dict[str, Any]], None]
 def get_graph_schema() -> dict[str, Any]:
     """Return static representation of the 3-node LangGraph pipeline."""
     return {
+        "graph_id": "agent_mind_v1",
         "nodes": [
             {"id": "planner", "label": "Task Planner", "role": "Objective understanding & task decomposition"},
             {"id": "architect", "label": "Architecture Engine", "role": "Step normalization & dependency validation"},
@@ -49,16 +50,16 @@ def get_graph_schema() -> dict[str, Any]:
             {"source": "coder", "target": "coder", "conditional": True, "label": "loop until steps completed"},
             {"source": "coder", "target": "__end__", "conditional": True, "label": "all steps verified"},
         ],
+        "state_model": ["idle", "active", "completed", "error"],
+        "activity_model": {"min": 0.0, "max": 1.0},
     }
 
 
 def _resolve_node_mutable_prompt(state: AgentState, node_id: str) -> str:
     prompt_overrides = state.get("prompt_overrides") or {}
-    if node_id in prompt_overrides and prompt_overrides[node_id] is not None:
-        return prompt_overrides[node_id]
-    if state.get("mutable_prompt") is not None:
-        return str(state["mutable_prompt"])
-    return ""
+    legacy_mutable = state.get("mutable_prompt")
+    return resolve_mutable_for_node(node_id, prompt_overrides, legacy_mutable)
+
 
 
 def _evaluate_goal_completion(
@@ -563,6 +564,12 @@ def _coder_agent(
             error_msg = str(exc)
             result = {"error": error_msg}
 
+        if isinstance(result, dict) and (result.get("success") is False or result.get("error")):
+            status = "failed"
+            if not error_msg:
+                error_msg = str(result.get("error") or "Tool execution failed")
+
+
         duration_ms = int((perf_counter() - t_start) * 1000)
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -647,9 +654,29 @@ async def astream_workflow(
 
     async for item in app.astream(
         init_state,
+        {"recursion_limit": recursion_limit},
         stream_mode=["debug", "messages", "updates"],
-        config={"recursion_limit": recursion_limit},
         debug=True,
         subgraphs=True,
     ):
         yield item
+
+
+def run_workflow(
+    user_prompt: str,
+    llm: BaseChatModel,
+    recursion_limit: int = 100,
+    mutable_prompt: Optional[str] = None,
+    prompt_overrides: Optional[dict[str, str]] = None,
+    event_callback: Optional[EventCallback] = None,
+) -> dict[str, Any]:
+    agent = build_agent(llm, event_callback=event_callback)
+    return agent.invoke(
+        {
+            "user_prompt": user_prompt,
+            "mutable_prompt": mutable_prompt,
+            "prompt_overrides": prompt_overrides or {},
+            "messages": [],
+        },
+        {"recursion_limit": recursion_limit},
+    )
