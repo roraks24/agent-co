@@ -12,3 +12,5 @@ langsmith
 ddgs
 beautifulsoup4
 httpx
+sqlalchemy
+psycopg2-binary
